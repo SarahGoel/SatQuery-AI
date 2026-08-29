@@ -1,0 +1,34 @@
+# SatQuery AI backend — pin versions for air-gapped reproducibility.
+# Native GDAL is provided by the Ubuntu image, not by these wheels.
+
+fastapi==0.110.0
+uvicorn[standard]==0.27.1
+pydantic==2.6.1
+pydantic-settings==2.2.1
+python-multipart==0.0.9
+starlette==0.36.3
+
+rasterio==1.3.9
+shapely==2.0.2
+fiona==1.9.5
+pyproj==3.6.1
+numpy==1.26.4
+opencv-python-headless==4.9.0.80
+Pillow==10.2.0
+
+torch==2.2.1
+transformers==4.38.1
+peft==0.8.2
+langgraph==0.1.1
+langchain-core==0.1.27
+safetensors==0.4.2
+accelerate==0.27.2
+
+SQLAlchemy==2.0.27
+GeoAlchemy2==0.14.3
+psycopg2-binary==2.9.9
+greenlet==3.0.3
+
+httpx==0.27.0
+aiofiles==23.2.1
+python-json-logger==2.0.7

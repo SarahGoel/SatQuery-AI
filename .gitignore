@@ -216,3 +216,22 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# SatQuery AI — node, build artifacts, and air-gapped weights
+node_modules/
+frontend/dist/
+frontend/build/
+local_models/**
+!local_models/README.md
+*.tif
+*.tiff
+*.jp2
+*.h5
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.onnx
+*.ckpt
+uploads/
+artifacts/

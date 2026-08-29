@@ -1,0 +1,4 @@
+frontend/.env
+frontend/.env.local
+*.tif
+*.tiff
