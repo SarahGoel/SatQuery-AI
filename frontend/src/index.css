@@ -1,15 +1,58 @@
+@import "ol/ol.css";
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-html,
-body,
-#root {
-  height: 100%;
-  margin: 0;
+@layer base {
+  body {
+    @apply antialiased bg-slate-50 text-slate-800 transition-colors duration-200;
+  }
+  
+  .dark body {
+    @apply bg-[#0B111E] text-slate-100;
+  }
 }
 
-.ol-viewport,
-.ol-layer {
-  border-radius: 0.5rem;
+/* Custom subtle scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(156, 163, 175, 0.4);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(156, 163, 175, 0.7);
+}
+
+.ol-control {
+  background-color: rgba(255, 255, 255, 0.85) !important;
+  border-radius: 0.375rem !important;
+  padding: 2px !important;
+  border: 1px solid rgba(226, 232, 240, 0.8) !important;
+}
+
+.dark .ol-control {
+  background-color: rgba(18, 26, 42, 0.85) !important;
+  border: 1px solid rgba(30, 41, 59, 0.8) !important;
+}
+
+.ol-control button {
+  background-color: transparent !important;
+  color: #334155 !important;
+  font-weight: bold !important;
+  border-radius: 0.25rem !important;
+}
+
+.dark .ol-control button {
+  color: #e2e8f0 !important;
+}
+
+.ol-control button:hover {
+  background-color: rgba(59, 130, 246, 0.15) !important;
+  color: #2563eb !important;
 }
