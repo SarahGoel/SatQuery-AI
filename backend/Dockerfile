@@ -1,12 +1,14 @@
-# Ubuntu 22.04 with native GDAL 3.8+ for Rasterio/Fiona on air-gapped GPU hosts.
+# Ubuntu 22.04 / Python 3.10 CPU fallback.
+# Prefer the repository-root Dockerfile for CUDA 12.1 + GDAL 3.8.4 (source build).
 FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    GDAL_VERSION=3.8.5 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app \
+    LOCAL_MODELS_DIR=/local_models
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         software-properties-common \
@@ -14,12 +16,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gnupg \
         wget \
         curl \
+        git \
         build-essential \
-        python3.11 \
-        python3.11-dev \
-        python3.11-venv \
+        python3 \
+        python3-dev \
+        python3-venv \
         python3-pip \
-        libpq-dev \
         libproj-dev \
         libgeos-dev \
         libspatialindex-dev \
@@ -33,9 +35,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
         gdal-bin \
         libgdal-dev \
-        python3-gdal \
-    && ln -sf /usr/bin/python3.11 /usr/bin/python \
-    && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
+    && ln -sf /usr/bin/python3 /usr/bin/python \
+    && python --version \
     && python -m pip install --upgrade pip \
     && gdal-config --version \
     && apt-get clean \
@@ -43,7 +44,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV CPLUS_INCLUDE_PATH=/usr/include/gdal \
     C_INCLUDE_PATH=/usr/include/gdal \
-    GDAL_DATA=/usr/share/gdal
+    GDAL_DATA=/usr/share/gdal \
+    PROJ_LIB=/usr/share/proj
 
 WORKDIR /app
 
@@ -51,7 +53,11 @@ COPY requirements.txt /app/requirements.txt
 RUN python -m pip install -r /app/requirements.txt
 
 COPY . /app
-RUN mkdir -p /app/uploads /app/artifacts
+RUN mkdir -p /local_models/sam /local_models/bigearthnet /local_models/cdvqa /local_models/vllm \
+    && useradd --create-home --uid 1000 --shell /usr/sbin/nologin satquery \
+    && chown -R satquery:satquery /app /local_models
+
+USER satquery
 
 EXPOSE 8000
 

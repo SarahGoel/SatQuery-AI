@@ -1,5 +1,6 @@
-# SatQuery AI backend — Phase 1 pins (mirrors repository-root requirements.txt)
-# plus extras still imported by backend/app (SQL schemas remain the DB teammate's).
+# SatQuery AI — Phase 1 Python lockfile (air-gapped reproducibility).
+# Native GDAL 3.8.4 / PROJ / GEOS are provided by the container image.
+# The CUDA image installs torch/torchvision from the cu121 index before this file.
 
 fastapi==0.110.0
 uvicorn[standard]==0.27.1
@@ -16,17 +17,8 @@ shapely==2.0.3
 opencv-python-headless==4.9.0.80
 numpy==1.26.4
 Pillow==10.2.0
-fiona==1.9.5
-pyproj==3.6.1
 
 python-dotenv==1.0.1
 requests==2.31.0
 pytest==8.0.2
 httpx==0.27.0
-aiofiles==23.2.1
-python-json-logger==2.0.7
-
-SQLAlchemy==2.0.27
-GeoAlchemy2==0.14.3
-psycopg2-binary==2.9.9
-greenlet==3.0.3

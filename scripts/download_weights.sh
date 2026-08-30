@@ -5,7 +5,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEST="${LOCAL_MODELS_DIR:-$ROOT/local_models}"
+# Always stage onto the host tree (never the container path /local_models).
+DEST="${LOCAL_MODELS_HOST_DIR:-$ROOT/local_models}"
 PYTHON="${PYTHON:-python3}"
 
 mkdir -p \
@@ -14,7 +15,9 @@ mkdir -p \
   "$DEST/mobilesam" \
   "$DEST/bigearthnet" \
   "$DEST/fusion" \
-  "$DEST/change_vqa"
+  "$DEST/change_vqa" \
+  "$DEST/cdvqa" \
+  "$DEST/vllm"
 
 echo "[satquery] Staging weights into ${DEST}"
 
@@ -60,5 +63,5 @@ if command -v find >/dev/null 2>&1; then
     | xargs -0 -r sha256sum || true
 fi
 
-echo "[satquery] Done. Copy ${DEST} to the air-gapped host and mount at /models."
+echo "[satquery] Done. Copy ${DEST} to the air-gapped host and mount at /local_models."
 echo "[satquery] Team-trained BigEarthNet / fusion / change-vqa checkpoints must be copied manually into their folders."

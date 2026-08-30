@@ -1,112 +1,75 @@
-# Local orchestration for SatQuery AI (SIH26167).
-# Geospatial services, inference runtime, and UI are isolated so the stack
-# can be lifted onto an air-gapped on-premise GPU host without code changes.
-#
-# Inference: set INFERENCE_BACKEND=ollama (default) or vllm.
-# GPU: uncomment deploy.resources on the inference service for NVIDIA runtimes.
+# SatQuery AI — Phase 1 orchestration (SIH26167).
+# Multi-container layout is ready: backend is the sovereign FastAPI/GDAL runtime.
+# Database and inference services are stubbed as comments for later phases.
 
 services:
-  postgis:
-    image: postgis/postgis:16-3.4
-    container_name: satquery-postgis
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-satquery}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-satquery}
-      POSTGRES_DB: ${POSTGRES_DB:-satquery}
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
-    volumes:
-      - postgis_data:/var/lib/postgresql/data
-      - ./db/init-postgis.sh:/docker-entrypoint-initdb.d/01-init-postgis.sh:ro
-      - ./backend/app/database/init_db.sql:/docker-entrypoint-initdb.d/02-init-schema.sql:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-satquery} -d ${POSTGRES_DB:-satquery}"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-    restart: unless-stopped
-
-  ollama:
-    image: ollama/ollama:latest
-    container_name: satquery-ollama
-    ports:
-      - "${OLLAMA_PORT:-11434}:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-      - ./local_models:/models:ro
-    environment:
-      OLLAMA_HOST: 0.0.0.0
-      OLLAMA_MODELS: /root/.ollama/models
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
-    healthcheck:
-      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
-      interval: 20s
-      timeout: 10s
-      retries: 5
-    restart: unless-stopped
-
-  # Optional OpenAI-compatible Open-Weight serving. Enable with:
-  #   docker compose --profile vllm up
-  vllm:
-    profiles: ["vllm"]
-    image: vllm/vllm-openai:latest
-    container_name: satquery-vllm
-    ports:
-      - "${VLLM_PORT:-8001}:8000"
-    volumes:
-      - ./local_models:/models:ro
-    environment:
-      HUGGING_FACE_HUB_TOKEN: ""
-    command: >
-      --model /models/llava-3b
-      --served-model-name llava-3b
-      --host 0.0.0.0
-      --port 8000
-      --download-dir /models
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
-    restart: unless-stopped
-
   backend:
     build:
-      context: ./backend
+      context: .
       dockerfile: Dockerfile
     container_name: satquery-backend
-    depends_on:
-      postgis:
-        condition: service_healthy
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     environment:
       SATQUERY_ENV: ${SATQUERY_ENV:-development}
-      DATABASE_URL: postgresql://${POSTGRES_USER:-satquery}:${POSTGRES_PASSWORD:-satquery}@postgis:5432/${POSTGRES_DB:-satquery}
-      INFERENCE_BACKEND: ${INFERENCE_BACKEND:-ollama}
-      OLLAMA_BASE_URL: http://ollama:11434
-      VLLM_BASE_URL: http://vllm:8000
-      LOCAL_MODELS_DIR: /models
+      PYTHONPATH: /app
+      LOCAL_MODELS_DIR: /local_models
+      DATA_DIR: /app/data
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      # DATABASE_URL is owned by the database teammate. Uncomment with the db service.
+      # DATABASE_URL: postgresql://${POSTGRES_USER:-satquery}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-satquery}
     volumes:
-      - ./backend:/app
-      - ./local_models:/models:ro
-      - uploads_data:/app/uploads
+      - ./backend:/app/backend
+      - ./data:/app/data
+      - ./local_models:/local_models:ro
+      - ./models:/app/models
+    # GPU hosts: uncomment the block below (requires NVIDIA Container Toolkit).
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health')\""]
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health')\"",
+        ]
       interval: 20s
       timeout: 10s
       retries: 8
     restart: unless-stopped
 
+  # -------------------------------------------------------------------------
+  # db — PostGIS / PostgreSQL (placeholder for database architecture teammate)
+  # Plug in image, credentials, init scripts, and healthcheck here.
+  # When ready, add `depends_on: db` to the backend service.
+  #
+  # db:
+  #   image: postgis/postgis:16-3.4
+  #   container_name: satquery-db
+  #   environment:
+  #     POSTGRES_USER: ${POSTGRES_USER:-satquery}
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  #     POSTGRES_DB: ${POSTGRES_DB:-satquery}
+  #   ports:
+  #     - "${POSTGRES_PORT:-5432}:5432"
+  #   volumes:
+  #     - postgis_data:/var/lib/postgresql/data
+  #     # - ./db/init-postgis.sh:/docker-entrypoint-initdb.d/01-init-postgis.sh:ro
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-satquery} -d ${POSTGRES_DB:-satquery}"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 10
+  #   restart: unless-stopped
+  # -------------------------------------------------------------------------
+
+  # Optional analyst UI (unchanged Phase 0 frontend). Not required for air-gap health.
   frontend:
     build:
       context: ./frontend
@@ -119,8 +82,7 @@ services:
     ports:
       - "${FRONTEND_PORT:-3000}:80"
     restart: unless-stopped
+    profiles: ["ui"]
 
-volumes:
-  postgis_data:
-  ollama_data:
-  uploads_data:
+# volumes:
+#   postgis_data:
