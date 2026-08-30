@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     VLLM_BASE_URL: str = "http://localhost:8001"
     VLM_MODEL_NAME: str = "llava-3b"
 
-    LOCAL_MODELS_DIR: Path = Path("/models")
+    LOCAL_MODELS_DIR: Path = Path("/local_models")
     SAM_WEIGHTS_PATH: Path | None = None
     MOBILESAM_WEIGHTS_PATH: Path | None = None
     BIGEARTHNET_CHECKPOINT: Path | None = None
