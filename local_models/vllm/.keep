@@ -1,0 +1,2 @@
+SatQuery AI offline registry: vllm
+Drop local LLM / VLM snapshots here (e.g. LLaVA-3B). Do not commit binaries.

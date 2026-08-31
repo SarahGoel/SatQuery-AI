@@ -1,6 +1,6 @@
-# Ubuntu 22.04 / Python 3.10 CPU fallback.
-# Prefer the repository-root Dockerfile for CUDA 12.1 + GDAL 3.8.4 (source build).
-FROM ubuntu:22.04
+# FastAPI backend with CUDA runtime so nvidia-smi and GPU reservations work.
+# Built from ./backend (see docker-compose.yml). Air-gapped weights are bind-mounted.
+FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -8,7 +8,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
     PYTHONPATH=/app \
-    LOCAL_MODELS_DIR=/local_models
+    LOCAL_MODELS_DIR=/local_models \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         software-properties-common \
@@ -30,15 +32,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libtiff-dev \
         libopenjp2-7-dev \
         zlib1g-dev \
+        libpq-dev \
     && add-apt-repository -y ppa:ubuntugis/ubuntugis-unstable \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         gdal-bin \
         libgdal-dev \
     && ln -sf /usr/bin/python3 /usr/bin/python \
-    && python --version \
     && python -m pip install --upgrade pip \
-    && gdal-config --version \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -53,7 +54,15 @@ COPY requirements.txt /app/requirements.txt
 RUN python -m pip install -r /app/requirements.txt
 
 COPY . /app
-RUN mkdir -p /local_models/sam /local_models/bigearthnet /local_models/cdvqa /local_models/vllm \
+RUN mkdir -p \
+        /local_models/sam \
+        /local_models/bigearthnet \
+        /local_models/cdvqa \
+        /local_models/vllm \
+        /app/models/sam \
+        /app/models/bigearthnet \
+        /app/models/cdvqa \
+        /app/models/vllm \
     && useradd --create-home --uid 1000 --shell /usr/sbin/nologin satquery \
     && chown -R satquery:satquery /app /local_models
 

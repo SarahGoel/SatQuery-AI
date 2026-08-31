@@ -1,19 +1,17 @@
-# Local model weights (air-gapped)
+## Sovereign Weight Registry Guide
 
-This directory is the **only** place the backend should load checkpoints from on an isolated GPU host. Do not commit weight files.
+For secure, zero-network air-gapped deployments, manually download model weights and place them in the following directories.
 
-Host path `./local_models` is bind-mounted to **`/local_models`** in the backend container.
+Host path `./local_models` is bind-mounted into the backend container at **`/app/models`** and **`/local_models`** (read-only). Do not commit weight binaries.
 
-## Expected layout (Phase 1)
-
-```
-local_models/
-  README.md
-  sam/            # Segment Anything (and MobileSAM) checkpoints
-  bigearthnet/    # BigEarthNet-tuned encoder
-  cdvqa/          # Change-detection VQA / temporal attention
-  vllm/           # Open-weight VLM snapshots consumed by vLLM / Ollama
-```
+1. `local_models/sam/`
+   - MobileSAM visual backbone checkpoints (e.g., `mobile_sam.pt`).
+2. `local_models/bigearthnet/`
+   - PEFT/LoRA adapter weights for domain adaptation (`adapter_model.bin`).
+3. `local_models/cdvqa/`
+   - Checkpoints for temporal difference attention and Change-VQA modules.
+4. `local_models/vllm/`
+   - Inference weights for local LLM servers (e.g., LLaVA-3B vision-language models).
 
 Create the tree (idempotent):
 
@@ -21,6 +19,13 @@ Create the tree (idempotent):
 bash scripts/init_env.sh
 ```
 
-Populate binaries on a **connected** machine (`scripts/download_weights.sh` or manual copy), then rsync `local_models/` onto the air-gapped node. Do not set `HUGGING_FACE_HUB_TOKEN` on the isolated host.
+Populate binaries on a **connected** machine (`scripts/download_weights.sh` or manual copy), then copy `local_models/` onto the air-gapped node. Do not set `HUGGING_FACE_HUB_TOKEN` on the isolated host.
 
 `GET /api/v1/health` reports `air_gap_ready` only when `/local_models` exists, is readable, and the four registry subdirectories are present.
+
+Verify orchestration and GPU:
+
+```bash
+docker compose ps
+docker compose exec backend nvidia-smi
+```

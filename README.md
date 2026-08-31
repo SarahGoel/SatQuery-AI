@@ -94,7 +94,7 @@ python -m venv .venv
 # Windows: .venv\Scripts\activate
 source .venv/bin/activate
 pip install -r requirements.txt
-export DATABASE_URL=postgresql://satquery:satquery@localhost:5432/satquery
+export DATABASE_URL=postgresql://satquery_admin:isro_secure_db@localhost:5432/satquery_gis
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 

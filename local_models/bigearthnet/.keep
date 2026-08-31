@@ -1,0 +1,2 @@
+SatQuery AI offline registry: bigearthnet
+Drop PEFT/LoRA adapters here (e.g. adapter_model.bin). Do not commit binaries.

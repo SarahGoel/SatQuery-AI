@@ -56,7 +56,7 @@ if [[ ! -f "${ROOT}/.env" && -f "${ROOT}/.env.example" ]]; then
   echo "[satquery] Wrote ${ROOT}/.env from .env.example (edit credentials locally)."
 fi
 
-echo "[satquery] Host bind will map ${MODELS_HOST} -> /local_models inside the backend container."
+echo "[satquery] Host bind maps ${MODELS_HOST} -> /local_models and /app/models inside the backend container."
 echo "[satquery] Registries:"
 find "${MODELS_HOST}" -mindepth 1 -maxdepth 1 -type d | sort
 echo "[satquery] Done. Next: docker compose up --build"

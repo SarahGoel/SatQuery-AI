@@ -1,38 +1,67 @@
-# SatQuery AI — Phase 1 orchestration (SIH26167).
-# Multi-container layout is ready: backend is the sovereign FastAPI/GDAL runtime.
-# Database and inference services are stubbed as comments for later phases.
+version: "3.8"
+
+# SatQuery AI — Phase 1: local air-gapped orchestration.
+# db: PostgreSQL 16 + PostGIS 3.4 (spatial GIS volume)
+# backend: FastAPI on NVIDIA GPU, offline weight cache
+# frontend: React compiled in-image, served on :3000
 
 services:
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: satquery_db
+    environment:
+      - POSTGRES_USER=satquery_admin
+      - POSTGRES_PASSWORD=isro_secure_db
+      - POSTGRES_DB=satquery_gis
+    ports:
+      - "5432:5432"
+    volumes:
+      - satquery_db_data:/var/lib/postgresql/data
+      - ./db/init-postgis.sh:/docker-entrypoint-initdb.d/init-postgis.sh
+    networks:
+      - satquery_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U satquery_admin -d satquery_gis"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
   backend:
     build:
-      context: .
+      context: ./backend
       dockerfile: Dockerfile
-    container_name: satquery-backend
+    container_name: satquery_backend
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     ports:
-      - "${BACKEND_PORT:-8000}:8000"
-    environment:
-      SATQUERY_ENV: ${SATQUERY_ENV:-development}
-      PYTHONPATH: /app
-      LOCAL_MODELS_DIR: /local_models
-      DATA_DIR: /app/data
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
-      HF_HUB_OFFLINE: "1"
-      TRANSFORMERS_OFFLINE: "1"
-      # DATABASE_URL is owned by the database teammate. Uncomment with the db service.
-      # DATABASE_URL: postgresql://${POSTGRES_USER:-satquery}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-satquery}
+      - "8000:8000"
     volumes:
-      - ./backend:/app/backend
-      - ./data:/app/data
+      - ./backend:/app
+      - ./local_models:/app/models
       - ./local_models:/local_models:ro
-      - ./models:/app/models
-    # GPU hosts: uncomment the block below (requires NVIDIA Container Toolkit).
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
+      - ./data:/app/data
+    environment:
+      - DATABASE_URL=postgresql://satquery_admin:isro_secure_db@db:5432/satquery_gis
+      - OLLAMA_HOST=http://host.docker.internal:11434
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - LOCAL_MODELS_DIR=/local_models
+      - PYTHONPATH=/app
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+      - CORS_ORIGINS=http://localhost:3000,http://localhost:5173
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - satquery_network
     healthcheck:
       test:
         [
@@ -44,45 +73,24 @@ services:
       retries: 8
     restart: unless-stopped
 
-  # -------------------------------------------------------------------------
-  # db — PostGIS / PostgreSQL (placeholder for database architecture teammate)
-  # Plug in image, credentials, init scripts, and healthcheck here.
-  # When ready, add `depends_on: db` to the backend service.
-  #
-  # db:
-  #   image: postgis/postgis:16-3.4
-  #   container_name: satquery-db
-  #   environment:
-  #     POSTGRES_USER: ${POSTGRES_USER:-satquery}
-  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-  #     POSTGRES_DB: ${POSTGRES_DB:-satquery}
-  #   ports:
-  #     - "${POSTGRES_PORT:-5432}:5432"
-  #   volumes:
-  #     - postgis_data:/var/lib/postgresql/data
-  #     # - ./db/init-postgis.sh:/docker-entrypoint-initdb.d/01-init-postgis.sh:ro
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-satquery} -d ${POSTGRES_DB:-satquery}"]
-  #     interval: 10s
-  #     timeout: 5s
-  #     retries: 10
-  #   restart: unless-stopped
-  # -------------------------------------------------------------------------
-
-  # Optional analyst UI (unchanged Phase 0 frontend). Not required for air-gap health.
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
       args:
         VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
-    container_name: satquery-frontend
+    container_name: satquery_frontend
+    ports:
+      - "3000:3000"
     depends_on:
       - backend
-    ports:
-      - "${FRONTEND_PORT:-3000}:80"
+    networks:
+      - satquery_network
     restart: unless-stopped
-    profiles: ["ui"]
 
-# volumes:
-#   postgis_data:
+volumes:
+  satquery_db_data:
+
+networks:
+  satquery_network:
+    driver: bridge

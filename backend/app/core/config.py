@@ -23,7 +23,7 @@ class Settings(BaseSettings):
 
     SATQUERY_ENV: str = "development"
     DATABASE_URL: str = (
-        "postgresql://satquery:satquery@localhost:5432/satquery"
+        "postgresql://satquery_admin:isro_secure_db@localhost:5432/satquery_gis"
     )
 
     INFERENCE_BACKEND: str = "ollama"  # ollama | vllm
@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     def resolved_mobilesam_weights(self) -> Path:
         if self.MOBILESAM_WEIGHTS_PATH:
             return Path(self.MOBILESAM_WEIGHTS_PATH)
-        return self.LOCAL_MODELS_DIR / "mobilesam" / "mobile_sam.pt"
+        return self.LOCAL_MODELS_DIR / "sam" / "mobile_sam.pt"
 
     def resolved_bigearthnet(self) -> Path:
         if self.BIGEARTHNET_CHECKPOINT:

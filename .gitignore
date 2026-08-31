@@ -223,6 +223,7 @@ frontend/dist/
 frontend/build/
 local_models/**
 !local_models/README.md
+!local_models/**/
 !local_models/**/.keep
 /data/raw/*
 !/data/raw/.gitkeep
