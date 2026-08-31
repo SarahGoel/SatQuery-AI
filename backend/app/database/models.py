@@ -15,7 +15,7 @@ from sqlalchemy import (
     String,
     Text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.session import Base
@@ -27,13 +27,17 @@ class AuditableExecutionTrace(Base):
     trace_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     task_type: Mapped[str] = mapped_column(String(64), nullable=False)
     user_query: Mapped[str] = mapped_column(Text, nullable=False)
-    crs: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    affine_transform_matrix: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    bounding_box_geometry = mapped_column(Geometry("POLYGON", srid=4326), nullable=True)
-    overall_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
-    final_output: Mapped[str | None] = mapped_column(Text, nullable=True)
+    crs: Mapped[str] = mapped_column(String(32), nullable=False)
+    affine_transform_matrix: Mapped[list[float]] = mapped_column(
+        ARRAY(Float), nullable=False
+    )
+    bounding_box_geometry = mapped_column(
+        Geometry("POLYGON", srid=4326), nullable=False
+    )
+    overall_confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    final_output: Mapped[str] = mapped_column(Text, nullable=False)
     executed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+        DateTime, nullable=True, default=datetime.utcnow
     )
 
     model_executions: Mapped[list["TraceModelExecution"]] = relationship(
@@ -46,10 +50,10 @@ class AuditableExecutionTrace(Base):
 class ModelRegistry(Base):
     __tablename__ = "model_registry"
 
-    model_name: Mapped[str] = mapped_column(String(128), primary_key=True)
-    model_version: Mapped[str] = mapped_column(String(64), nullable=False)
-    model_type: Mapped[str] = mapped_column(String(64), nullable=False)
-    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    model_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    model_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    model_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=True, default=True)
     local_weights_path: Mapped[str] = mapped_column(Text, nullable=False)
 
     executions: Mapped[list["TraceModelExecution"]] = relationship(
@@ -69,14 +73,14 @@ class TraceModelExecution(Base):
     trace_id: Mapped[str] = mapped_column(
         String(64),
         ForeignKey("auditable_execution_traces.trace_id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
     )
     model_name: Mapped[str] = mapped_column(
-        String(128),
-        ForeignKey("model_registry.model_name"),
-        nullable=False,
+        String(64),
+        ForeignKey("model_registry.model_name", ondelete="RESTRICT"),
+        nullable=True,
     )
-    parameter_configuration: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    parameter_configuration: Mapped[dict] = mapped_column(JSONB, nullable=False)
     execution_order: Mapped[int] = mapped_column(Integer, nullable=False)
 
     trace: Mapped[AuditableExecutionTrace] = relationship(
