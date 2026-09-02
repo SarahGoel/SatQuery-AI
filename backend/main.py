@@ -34,9 +34,11 @@ app.add_middleware(
 
 
 def _gdal_version() -> str:
+    if hasattr(rasterio, "__gdal_version__"):
+        return str(rasterio.__gdal_version__)
     if hasattr(rasterio, "gdal_version"):
         return str(rasterio.gdal_version())
-    return str(getattr(rasterio, "__gdal_version__", "unknown"))
+    return "unknown"
 
 
 def _include_existing_routers() -> None:

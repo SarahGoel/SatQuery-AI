@@ -11,7 +11,6 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-import rasterio
 from shapely.geometry import box, mapping
 from shapely.geometry.base import BaseGeometry
 from sqlalchemy.orm import Session
@@ -25,6 +24,7 @@ from app.schemas.trace import (
 )
 from app.schemas.validation import TaskType
 from app.services.geospatial.alignment import SpatialAligner
+from app.services.geospatial.parser import parse_geotiff_metadata as ingest_geotiff_metadata
 from app.services.geospatial.spectral import SpectralExtractor
 from app.services.geospatial.vector import raster_mask_to_geojson
 from app.services.models.base import LocalVisionLanguageClient
@@ -88,18 +88,14 @@ class SatQueryController:
         path: Path,
         modalities: list[str],
     ) -> InputMetadataSchema:
-        """Read CRS, bounds, and affine coefficients via Rasterio."""
-        with rasterio.open(path) as src:
-            if src.crs is None:
-                raise ValueError(f"{path.name} has no CRS; cannot ingest unreferenced raster")
-            crs = src.crs.to_string()
-            bounds = [float(src.bounds.left), float(src.bounds.bottom), float(src.bounds.right), float(src.bounds.top)]
-            transform = list(src.transform)[:6]
+        """Read CRS, affine transform, bounds, and sensor modality via the GIS parser."""
+        parsed = ingest_geotiff_metadata(str(path))
+        resolved_modalities = list(modalities) if modalities else list(parsed["modalities"])
         return InputMetadataSchema(
-            crs=crs,
-            bounds=bounds,
-            affine_transform=transform,
-            modalities=modalities,
+            crs=str(parsed["crs"]),
+            bounds=[float(v) for v in parsed["bounds"]],
+            affine_transform=[float(v) for v in parsed["affine_transform"][:6]],
+            modalities=resolved_modalities,
         )
 
     def validate_spatial_alignment(

@@ -2,6 +2,9 @@
 -- Applied on first cluster boot via /docker-entrypoint-initdb.d (after PostGIS init).
 -- Boundaries use EPSG:4326 (GEOMETRY(Polygon, 4326)).
 
+CREATE EXTENSION IF NOT EXISTS postgis;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
 -- 1. Table to trace each session/execution
 CREATE TABLE IF NOT EXISTS auditable_execution_traces (
     trace_id VARCHAR(64) PRIMARY KEY,
