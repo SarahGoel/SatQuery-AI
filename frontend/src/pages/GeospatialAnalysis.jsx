@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import LayerControl from "../components/workspace/LayerControl";
 import EmptyStateWorkspace from "../components/workspace/EmptyStateWorkspace";
 import ChatPanel from "../components/workspace/ChatPanel";
+import MapViewer from "../components/MapViewer";
 import {
   Maximize2,
   Minimize2,
@@ -51,13 +52,44 @@ export default function GeospatialAnalysis() {
   const [assistantInput, setAssistantInput] = useState("");
 
   const presetLocations = [
-    { id: "assam", name: "Brahmaputra Basin, Assam", coords: "26.2006° N, 92.9376° E" },
-    { id: "kerala", name: "Western Ghats, Kerala", coords: "10.8505° N, 76.2711° E" },
-    { id: "sundarbans", name: "Sundarbans Delta Zone", coords: "21.9497° N, 88.8056° E" },
-    { id: "godavari", name: "Godavari River Basin", coords: "16.9891° N, 81.8040° E" },
-    { id: "karnataka", name: "Coastal Karnataka", coords: "14.5479° N, 74.5566° E" },
-    { id: "ladakh", name: "Pangong Tso & Ladakh Glaciers", coords: "33.7595° N, 78.6674° E" },
+    { id: "assam", name: "Brahmaputra Basin, Assam", coords: "26.2006° N, 92.9376° E", lon: 92.9376, lat: 26.2006 },
+    { id: "kerala", name: "Western Ghats, Kerala", coords: "10.8505° N, 76.2711° E", lon: 76.2711, lat: 10.8505 },
+    { id: "sundarbans", name: "Sundarbans Delta Zone", coords: "21.9497° N, 88.8056° E", lon: 88.8056, lat: 21.9497 },
+    { id: "godavari", name: "Godavari River Basin", coords: "16.9891° N, 81.8040° E", lon: 81.8040, lat: 16.9891 },
+    { id: "karnataka", name: "Coastal Karnataka", coords: "14.5479° N, 74.5566° E", lon: 74.5566, lat: 14.5479 },
+    { id: "ladakh", name: "Pangong Tso & Ladakh Glaciers", coords: "33.7595° N, 78.6674° E", lon: 78.6674, lat: 33.7595 },
   ];
+
+  const pad = 0.18;
+  const selectedBbox = selectedLocation
+    ? [
+        selectedLocation.lon - pad,
+        selectedLocation.lat - pad,
+        selectedLocation.lon + pad,
+        selectedLocation.lat + pad,
+      ]
+    : null;
+  const selectedOverlay = selectedLocation
+    ? {
+        type: "FeatureCollection",
+        features: [
+          {
+            type: "Feature",
+            properties: { name: selectedLocation.name, mask: "change-vector" },
+            geometry: {
+              type: "Polygon",
+              coordinates: [[
+                [selectedLocation.lon - 0.08, selectedLocation.lat - 0.05],
+                [selectedLocation.lon + 0.1, selectedLocation.lat - 0.04],
+                [selectedLocation.lon + 0.12, selectedLocation.lat + 0.08],
+                [selectedLocation.lon - 0.06, selectedLocation.lat + 0.07],
+                [selectedLocation.lon - 0.08, selectedLocation.lat - 0.05],
+              ]],
+            },
+          },
+        ],
+      }
+    : null;
 
   const handleToggleIndexLayer = (key) => {
     setIndexLayers((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -298,9 +330,21 @@ export default function GeospatialAnalysis() {
           />
         </div>
 
-        {/* Center Column: Ready to Analyze Empty State (Flexible main area) */}
-        <div className="flex-1 min-w-0">
-          <EmptyStateWorkspace />
+        {/* Center Column: OpenLayers GIS client */}
+        <div className="relative flex-1 min-w-0">
+          <MapViewer
+            geojsonOverlay={selectedOverlay}
+            bboxCoordinates={selectedBbox || [68.0, 6.5, 97.5, 35.5]}
+            baseImagery={baseImagery}
+            onBaseImageryChange={setBaseImagery}
+          />
+          {!selectedLocation && (
+            <div className="pointer-events-none absolute inset-x-0 bottom-10 z-20 flex justify-center px-4">
+              <div className="pointer-events-auto max-h-[70%] max-w-xl overflow-y-auto rounded-2xl shadow-xl">
+                <EmptyStateWorkspace />
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Right Column: AI Analysis Assistant (~430px) */}
