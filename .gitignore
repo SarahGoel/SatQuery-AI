@@ -251,3 +251,6 @@ local_models/**
 *.ckpt
 uploads/
 artifacts/
+
+# Generated Compose runtime (CPU GPU fallback) from ./run.sh
+.satquery/
