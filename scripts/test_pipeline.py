@@ -17,8 +17,6 @@ from rasterio.transform import from_bounds
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
-from app.schemas.trace import InputMetadataSchema  # noqa: E402
-from app.schemas.validation import TaskType  # noqa: E402
 from app.services.agent import SatQueryController  # noqa: E402
 
 
@@ -52,44 +50,46 @@ def main() -> int:
 
     controller = SatQueryController(db=None)
 
-    meta = controller.parse_geotiff_metadata(optical, ["optical"])
-    assert isinstance(meta, InputMetadataSchema)
-    print("parsed_crs", meta.crs, "bounds", meta.bounds)
+    meta = controller.parse_geotiff_metadata(str(optical))
+    assert meta["crs"] == "EPSG:4326"
+    print("parsed_crs", meta["crs"], "bounds", meta["bounds"])
 
-    t2_meta = controller.parse_geotiff_metadata(t2, ["optical-t2"])
-    controller.validate_spatial_alignment(meta, [t2_meta])
+    t2_meta = controller.parse_geotiff_metadata(str(t2))
+    assert controller.validate_spatial_alignment(meta, t2_meta)
     print("alignment_ok")
 
     cases = [
-        ("What changed between T1 and T2?", True, False, TaskType.BI_TEMPORAL_CHANGE_ANALYSIS),
-        ("Highlight industrial rooftops", False, False, TaskType.SINGLE_IMAGE_GROUNDING),
-        ("Fuse RISAT with Cartosat for flood extent", False, True, TaskType.CROSS_MODAL_JOINT_ANALYSIS),
-        ("Describe land cover in this scene", False, False, TaskType.SINGLE_IMAGE_VQA),
+        ("What changed between these dates?", "bi_temporal_change_analysis"),
+        ("Highlight industrial rooftops", "single_image_grounding"),
+        ("where is the reservoir", "single_image_grounding"),
+        ("Combine optical and SAR flood extent", "cross_modal_joint_analysis"),
+        ("Describe land cover in this scene", "single_image_vqa"),
     ]
-    for query, has_t2, has_sar, expected in cases:
-        predicted = controller.classify_query(query, has_t2=has_t2, has_sar=has_sar)
-        print(f"classify {expected.value!r} -> {predicted.value}")
+    for query, expected in cases:
+        predicted = controller.classify_query(query)
+        print(f"classify {expected!r} -> {predicted}")
         assert predicted == expected, (query, predicted, expected)
 
     trace = controller.execute_workflow(
         query="Describe land cover in this scene",
-        optical_path=optical,
+        filepaths=[str(optical)],
     )
     print("vqa_trace", trace.trace_id, trace.task, trace.confidence_score)
+    assert trace.task == "single_image_vqa"
 
     change = controller.execute_workflow(
         query="What changed between these dates?",
-        optical_path=optical,
-        optical_t2_path=t2,
+        filepaths=[str(optical), str(t2)],
     )
     print("change_trace", change.task, "overlay", controller.last_overlay_uri)
+    assert change.task == "bi_temporal_change_analysis"
 
     fused = controller.execute_workflow(
-        query="Joint optical-SAR flood analysis",
-        optical_path=optical,
-        sar_path=sar,
+        query="Combine optical and SAR flood analysis",
+        filepaths=[str(optical), str(sar)],
     )
-    print("fusion_trace", fused.task, "geojson_features", len((controller.last_geojson or {}).get("features", [])))
+    print("fusion_trace", fused.task)
+    assert fused.task == "cross_modal_joint_analysis"
 
     print("pipeline_ok")
     return 0

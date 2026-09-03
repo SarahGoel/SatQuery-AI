@@ -80,11 +80,14 @@ async def analyze(
 
     controller = SatQueryController(db=db)
     try:
+        filepaths = [str(optical_path)]
+        if t2_path is not None:
+            filepaths.append(str(t2_path))
+        if sar_path is not None:
+            filepaths.append(str(sar_path))
         trace: AuditableTraceLogSchema = controller.execute_workflow(
             query=query,
-            optical_path=optical_path,
-            optical_t2_path=t2_path,
-            sar_path=sar_path,
+            filepaths=filepaths,
             force_task=forced.value if forced else None,
             use_mobilesam=use_mobilesam,
         )

@@ -50,5 +50,9 @@ VALUES
     ('change-vqa', '0.1.0', 'change_vqa', TRUE, '/app/models/cdvqa'),
     ('bigearthnet-encoder', '0.1.0', 'encoder', TRUE, '/app/models/bigearthnet/adapter_model.bin'),
     ('spatial-aligner', '0.1.0', 'geospatial', TRUE, '/app/app/services/geospatial/alignment.py'),
-    ('spectral-extractor', '0.1.0', 'geospatial', TRUE, '/app/app/services/geospatial/spectral.py')
+    ('spectral-extractor', '0.1.0', 'geospatial', TRUE, '/app/app/services/geospatial/spectral.py'),
+    ('RS-Grounding-V3', '3.0.0', 'grounding', TRUE, '/local_models/sam/mobile_sam.pt'),
+    ('SAR-Structure-Extractor', '1.0.0', 'sar_processing', TRUE, '/local_models/fusion/cross_attention.pt'),
+    ('CD-VQA-Pro', '1.0.0', 'change_detection', TRUE, '/local_models/change_vqa/temporal_attn.pt'),
+    ('Opt-SAR-Fusion-Net', '1.0.0', 'fusion', TRUE, '/local_models/fusion/cross_attention.pt')
 ON CONFLICT (model_name) DO NOTHING;
