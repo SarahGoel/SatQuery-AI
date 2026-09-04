@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import {
   Menu,
@@ -26,6 +26,24 @@ export default function TopNavbar({ onToggleSidebar, isSidebarCollapsed }) {
   const [showNotifications, setShowNotifications] = useState(false);
   const [showProfileMenu, setShowProfileMenu] = useState(false);
   const [showSystemModal, setShowSystemModal] = useState(false);
+  const [currentTime, setCurrentTime] = useState(new Date());
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCurrentTime(new Date());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const formattedDateTime = `${currentTime.toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  })}, ${currentTime.toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  })}`;
 
   const activeAlertCount = MOCK_ALERTS.filter(
     (a) => a.severity === "critical" || a.severity === "warning"
@@ -65,9 +83,6 @@ export default function TopNavbar({ onToggleSidebar, isSidebarCollapsed }) {
                 <span className="text-base font-bold tracking-tight text-slate-900 dark:text-white">
                   SatQuery AI
                 </span>
-                <span className="rounded bg-brand-100 px-1.5 py-0.2 text-[10px] font-semibold text-brand-700 dark:bg-brand-950/80 dark:text-brand-300">
-                  SIH26167
-                </span>
               </div>
               <p className="text-[11px] font-medium text-slate-400 dark:text-slate-400">
                 Satellite Intelligence
@@ -76,34 +91,11 @@ export default function TopNavbar({ onToggleSidebar, isSidebarCollapsed }) {
           </Link>
         </div>
 
-        {/* Center / Status Badges */}
-        <div className="hidden items-center space-x-3 md:flex lg:space-x-5">
-          {/* Air-Gapped Compliance Badge */}
-          <div className="flex items-center space-x-2 rounded-full border border-emerald-200 bg-emerald-50/80 px-3 py-1 text-xs font-medium text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-400">
-            <ShieldCheck className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
-            <span className="font-semibold">Air-Gapped & Compliant</span>
-            <span className="relative flex h-2 w-2">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"></span>
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500"></span>
-            </span>
-          </div>
-
-          {/* System Status Healthy */}
-          <button
-            onClick={() => setShowSystemModal(true)}
-            className="flex items-center space-x-2 rounded-lg px-2.5 py-1 text-xs text-slate-600 transition hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-dark-hover"
-          >
-            <span className="text-slate-400 dark:text-slate-500">System Status</span>
-            <span className="flex items-center space-x-1.5 font-medium text-emerald-600 dark:text-emerald-400">
-              <span className="h-2 w-2 rounded-full bg-emerald-500"></span>
-              <span>Healthy</span>
-            </span>
-          </button>
-
-          {/* Date / Time */}
-          <div className="flex items-center space-x-1.5 rounded-lg border border-slate-200/80 bg-slate-50/80 px-3 py-1 text-xs font-medium text-slate-600 dark:border-dark-border dark:bg-dark-bg/60 dark:text-slate-300">
+        {/* Center / Date & Time */}
+        <div className="hidden items-center space-x-3 md:flex">
+          <div className="flex items-center space-x-1.5 rounded-lg border border-slate-200/80 bg-slate-50/80 px-3 py-1.5 text-xs font-medium text-slate-600 dark:border-dark-border dark:bg-dark-bg/60 dark:text-slate-300">
             <Calendar className="h-3.5 w-3.5 text-slate-400" />
-            <span>30 May 2025, 09:30 AM</span>
+            <span>{formattedDateTime}</span>
           </div>
         </div>
 

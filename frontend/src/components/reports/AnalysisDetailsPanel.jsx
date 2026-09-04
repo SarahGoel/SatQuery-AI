@@ -107,7 +107,7 @@ export default function AnalysisDetailsPanel({
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
               {analysis.location}
             </p>
-            <p className="text-[11px] text-slate-400 dark:text-slate-500">
+            <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
               {analysis.datetimeStr || `${analysis.date}, ${analysis.time}`}
             </p>
           </div>
