@@ -33,13 +33,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: satquery_backend
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    
     ports:
       - "8000:8000"
     volumes:
@@ -47,6 +41,7 @@ services:
       - ./local_models:/app/models
       - ./local_models:/local_models:ro
       - ./data:/app/data
+      - ./training:/app/training
     environment:
       - DATABASE_URL=postgresql://satquery_admin:isro_secure_db@db:5432/satquery_gis
       - OLLAMA_HOST=http://host.docker.internal:11434
