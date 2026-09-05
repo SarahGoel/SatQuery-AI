@@ -253,29 +253,21 @@ export default function Reports() {
           type="total"
           title="Total Analyses"
           value={SUMMARY_STATS.totalAnalyses}
-          subtitle={SUMMARY_STATS.totalAnalysesSubtitle}
-          sparklineColor="blue"
         />
         <SummaryCard
           type="completed"
           title="Completed Analyses"
           value={SUMMARY_STATS.completedAnalyses}
-          subtitle={SUMMARY_STATS.completedAnalysesSubtitle}
-          sparklineColor="emerald"
         />
         <SummaryCard
           type="saved"
           title="Saved Reports"
           value={SUMMARY_STATS.savedReports}
-          subtitle={SUMMARY_STATS.savedReportsSubtitle}
-          sparklineColor="purple"
         />
         <SummaryCard
           type="last"
           title="Last Analysis"
           value={SUMMARY_STATS.lastAnalysis}
-          subtitle={SUMMARY_STATS.lastAnalysisSubtitle}
-          sparklineColor="amber"
         />
       </div>
 

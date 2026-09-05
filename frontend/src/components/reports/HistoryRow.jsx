@@ -129,7 +129,13 @@ export default function HistoryRow({
       </td>
 
       {/* Location Column */}
-      <td className="px-3 py-3.5 text-xs text-slate-600 dark:text-slate-300 whitespace-nowrap">
+      <td
+        className={`px-3 py-3.5 text-xs whitespace-nowrap ${
+          isSelected
+            ? "font-medium text-slate-800 dark:text-slate-200"
+            : "text-slate-600 dark:text-slate-300"
+        }`}
+      >
         <span>{analysis.location}</span>
       </td>
 
@@ -143,7 +149,13 @@ export default function HistoryRow({
       </td>
 
       {/* Date & Time */}
-      <td className="px-3 py-3.5 text-xs text-slate-600 dark:text-slate-400 whitespace-nowrap">
+      <td
+        className={`px-3 py-3.5 text-xs whitespace-nowrap ${
+          isSelected
+            ? "font-medium text-slate-900 dark:text-slate-100"
+            : "text-slate-600 dark:text-slate-300"
+        }`}
+      >
         {analysis.datetimeStr || `${analysis.date}, ${analysis.time}`}
       </td>
 
