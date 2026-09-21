@@ -13,6 +13,7 @@ shapely==2.0.2
 fiona==1.9.5
 GDAL==3.8.4
 torch==2.2.1+cu121
+torchvision==0.17.1+cu121
 transformers==4.38.1
 peft==0.8.2
 langgraph==0.1.1
