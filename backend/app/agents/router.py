@@ -331,6 +331,22 @@ class InputInspectorNode:
         )
         return INTERNAL_BITEMPORAL_CHANGE
 
+    @classmethod
+    def inspect_semantic(
+        cls,
+        query: str,
+        filepaths: Optional[List[str]] = None,
+        parsed_meta: Optional[List[Dict[str, Any]]] = None,
+        force_task: Optional[str] = None,
+    ):
+        from app.agents.semantic_router import SemanticIntentRouter
+        return SemanticIntentRouter().route(
+            query=query,
+            filepaths=filepaths,
+            parsed_meta=parsed_meta,
+            force_task=force_task,
+        )
+
     def __call__(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """LangGraph callable node interface."""
         query = state.get("query", "")
@@ -338,10 +354,21 @@ class InputInspectorNode:
         parsed_meta = state.get("parsed_meta", [])
         force_task = state.get("force_task")
 
-        task = self.inspect(
+        semantic_res = self.inspect_semantic(
             query=query,
             filepaths=filepaths,
             parsed_meta=parsed_meta,
             force_task=force_task,
         )
-        return {**state, "task": task, "task_type": STANDARDIZED_TASK_MAP.get(task, task)}
+        task = semantic_res.internal_task or self.inspect(
+            query=query,
+            filepaths=filepaths,
+            parsed_meta=parsed_meta,
+            force_task=force_task,
+        )
+        return {
+            **state,
+            "task": task,
+            "task_type": STANDARDIZED_TASK_MAP.get(task, semantic_res.task),
+            "intent_classification": semantic_res.to_dict(),
+        }

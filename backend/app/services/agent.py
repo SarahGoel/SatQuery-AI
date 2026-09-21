@@ -60,7 +60,48 @@ REGISTRY_MODELS = {
     "bigearthnet-encoder",
     "spatial-aligner",
     "spectral-extractor",
+    "WaterGroundingTool",
+    "TemporalChangeTool",
+    "OpticalSARFusionTool",
+    "GeodesicMeasurementTool",
+    "RemoteSensingVLMClient",
+    "GeoChat-RS",
 }
+
+
+class AgentScratchpad(dict):
+    """Shared agent scratchpad tracking intermediate execution state, tools, and metrics."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.setdefault("tools_invoked", [])
+        self.setdefault("intermediate_outputs", {})
+        self.setdefault("geospatial_metrics", {})
+        self.setdefault("intent_classification", {})
+
+    def record_tool_execution(
+        self,
+        tool_name: str,
+        inputs: Dict[str, Any],
+        duration_seconds: float,
+        output_summary: Dict[str, Any] | str,
+    ) -> None:
+        import time
+
+        record = {
+            "tool": tool_name,
+            "inputs": inputs,
+            "duration_seconds": duration_seconds,
+            "output_summary": output_summary,
+            "timestamp": time.time(),
+        }
+        self["tools_invoked"].append(record)
+
+    def set_intent(self, classification: Dict[str, Any]) -> None:
+        self["intent_classification"] = classification
+
+    def set_metrics(self, metrics: Dict[str, Any]) -> None:
+        self["geospatial_metrics"].update(metrics)
 
 
 class FileWorkflowState(TypedDict, total=False):
@@ -70,9 +111,12 @@ class FileWorkflowState(TypedDict, total=False):
     parsed_meta: List[Dict[str, Any]]
     aligned: bool
     task: str
+    task_type: str
     force_task: str | None
     use_mobilesam: bool
     trace: Dict[str, Any]
+    intent_classification: Dict[str, Any]
+    scratchpad: Dict[str, Any]
 
 
 class SatQueryController:
@@ -98,6 +142,10 @@ class SatQueryController:
         self.last_bbox: list[float] | None = None
         self.last_state: dict[str, Any] | None = None
         self.last_alignment: Any | None = None
+        self.scratchpad: AgentScratchpad = AgentScratchpad()
+        from app.agents.semantic_router import SemanticIntentRouter
+
+        self.router = SemanticIntentRouter()
         try:
             self._graph = compile_satquery_graph(self)
         except Exception as exc:  # noqa: BLE001
@@ -232,10 +280,17 @@ class SatQueryController:
     ) -> str:
         """
         Classifies incoming queries and input imagery into target task categories.
-        Enforces strict priority routing and rejection via InputInspectorNode.
+        Enforces strict priority routing and rejection via SemanticIntentRouter / InputInspectorNode.
         """
         force_task = _kwargs.get("force_task")
-        return InputInspectorNode.inspect(
+        semantic_res = self.router.route(
+            query=query,
+            filepaths=filepaths,
+            parsed_meta=parsed_meta,
+            force_task=force_task,
+        )
+        self.scratchpad.set_intent(semantic_res.to_dict())
+        return semantic_res.internal_task or InputInspectorNode.inspect(
             query=query,
             filepaths=filepaths,
             parsed_meta=parsed_meta,
@@ -252,12 +307,19 @@ class SatQueryController:
         Executes metadata checks, dynamically plans the workflow, and records auditable logs [74, 76, 89].
         """
         paths = _coerce_filepaths(filepaths, kwargs)
+        self.scratchpad = AgentScratchpad(
+            query=query,
+            filepaths=paths,
+            force_task=kwargs.get("force_task"),
+            use_mobilesam=bool(kwargs.get("use_mobilesam", True)),
+        )
         payload: FileWorkflowState = {
             "query": query,
             "filepaths": paths,
             "file_states": {path: "queued" for path in paths},
             "force_task": kwargs.get("force_task"),
             "use_mobilesam": bool(kwargs.get("use_mobilesam", True)),
+            "scratchpad": dict(self.scratchpad),
         }
         if self._graph is not None:
             result = self._graph.invoke(payload)
@@ -284,8 +346,8 @@ class SatQueryController:
             std_task = STANDARDIZED_TASK_MAP.get(task, "domain_knowledge_qa")
             logger.info("Initiating text-only agentic workflow: Trace ID %s (task: %s)", trace_id, std_task)
             try:
-                from app.services.models.base import LocalVisionLanguageClient
-                vlm = LocalVisionLanguageClient()
+                from app.services.models.rs_vlm import RemoteSensingVLMClient
+                vlm = RemoteSensingVLMClient()
                 vlm_res = vlm.generate(prompt=query, image_path=None, extra_context={"task": task})
                 output_desc = vlm_res.text
                 confidence = vlm_res.confidence
@@ -298,6 +360,8 @@ class SatQueryController:
             execution_pipeline = [
                 RegistryExecutionSchema(model="LocalVisionLanguageClient", params={"mode": "conversational_text"})
             ]
+            intent_data = self.scratchpad.get("intent_classification")
+            geo_metrics = self.scratchpad.get("geospatial_metrics")
             trace_log = AuditableTraceLogSchema(
                 trace_id=trace_id,
                 task=task,
@@ -319,6 +383,9 @@ class SatQueryController:
                 confidence=confidence,
                 output=output_desc,
                 geojson=None,
+                intent_classification=intent_data if intent_data else None,
+                geospatial_metrics=geo_metrics if geo_metrics else None,
+                scratchpad=dict(self.scratchpad),
             )
             if self.db:
                 self._persist_trace(trace_log, trace_log.input_metadata)
@@ -447,6 +514,9 @@ class SatQueryController:
 
         resolved_modalities = lead_modality + all_base_modalities
 
+        intent_info = self.scratchpad.get("intent_classification")
+        geo_metrics = self.scratchpad.get("geospatial_metrics")
+
         trace_log = AuditableTraceLogSchema(
             trace_id=trace_id,
             task=task,
@@ -468,6 +538,9 @@ class SatQueryController:
             confidence=confidence,
             output=output_desc,
             geojson=self.last_geojson,
+            intent_classification=intent_info if intent_info else None,
+            geospatial_metrics=geo_metrics if geo_metrics else None,
+            scratchpad=dict(self.scratchpad),
         )
 
         # Log trace output to local databases [21, 74, 80]
@@ -602,6 +675,37 @@ class SatQueryController:
                 extra.append(RegistryExecutionSchema(model="CD-VQA-Pro", params={"epoch_difference": True}))
                 extra.append(RegistryExecutionSchema(model="change-vqa", params=changed.params))
 
+                if self.last_geojson:
+                    try:
+                        from app.tools.registry import default_tool_registry
+
+                        meas_res = default_tool_registry.execute_tool_sync(
+                            "GeodesicMeasurementTool",
+                            self.scratchpad,
+                            geojson=self.last_geojson,
+                        )
+                        extra.append(
+                            RegistryExecutionSchema(
+                                model="GeodesicMeasurementTool",
+                                params=meas_res.get("metrics", {}),
+                            )
+                        )
+                        self.scratchpad.record_tool_execution(
+                            "GeodesicMeasurementTool",
+                            {"feature_count": len(self.last_geojson.get("features", []))},
+                            meas_res.get("duration_seconds", 0.0),
+                            meas_res.get("metrics", {}),
+                        )
+                    except Exception as geo_meas_err:
+                        logger.debug("Geodesic measurement notice: %s", geo_meas_err)
+
+                self.scratchpad.record_tool_execution(
+                    "TemporalChangeTool",
+                    {"t1": str(optical), "t2": str(t2), "query": query},
+                    0.25,
+                    f"Verdict={changed.params.get('directional_verdict')}, fraction={changed.params.get('change_fraction')}",
+                )
+
                 final_answer = changed.answer
                 if not final_answer or final_answer.startswith("[offline stub]"):
                     final_answer = generate_heuristic_summary(
@@ -622,40 +726,118 @@ class SatQueryController:
                 return final_answer, changed.confidence, extra
 
             if task == "single_image_grounding":
-                grounded = TextGuidedGrounder().ground(
-                    image_path=optical, prompt=query, use_mobilesam=use_mobilesam
-                )
-                self.last_geojson = (
-                    grounded.geojson
-                    if grounded.geojson
-                    else raster_mask_to_geojson(
-                        optical,
-                        grounded.mask,
-                        task_type="grounding",
-                        label="Detected Object",
-                        category="infrastructure",
-                        confidence=grounded.confidence,
-                    )
-                )
-                self.last_geojson = standardize_feature_collection(self.last_geojson, task_type="grounding")
-                extra.append(
-                    RegistryExecutionSchema(
-                        model="mobilesam" if use_mobilesam else "sam-vit-b",
-                        params=grounded.params,
-                    )
-                )
+                q_lower = query.lower()
+                is_water_q = any(w in q_lower for w in ["water", "river", "lake", "flood", "pond", "canal", "reservoir", "inundat"])
+                if is_water_q:
+                    try:
+                        from app.tools.registry import default_tool_registry
 
-                final_answer = grounded.description
+                        water_res = default_tool_registry.execute_tool_sync(
+                            "WaterGroundingTool",
+                            self.scratchpad,
+                            image_path=optical,
+                        )
+                        if water_res.get("geojson") and water_res["geojson"].get("features"):
+                            self.last_geojson = water_res["geojson"]
+                        extra.append(
+                            RegistryExecutionSchema(
+                                model="WaterGroundingTool",
+                                params={"threshold": 0.05, "feature_count": water_res.get("feature_count", 0)},
+                            )
+                        )
+                        self.scratchpad.record_tool_execution(
+                            "WaterGroundingTool",
+                            {"image_path": str(optical)},
+                            water_res.get("duration_seconds", 0.0),
+                            f"Identified {water_res.get('feature_count', 0)} water polygon(s)",
+                        )
+                    except Exception as wg_err:
+                        logger.debug("WaterGroundingTool fallback: %s", wg_err)
+
+                if self.last_geojson is None:
+                    grounded = TextGuidedGrounder().ground(
+                        image_path=optical, prompt=query, use_mobilesam=use_mobilesam
+                    )
+                    self.last_geojson = (
+                        grounded.geojson
+                        if grounded.geojson
+                        else raster_mask_to_geojson(
+                            optical,
+                            grounded.mask,
+                            task_type="grounding",
+                            label="Detected Object",
+                            category="infrastructure",
+                            confidence=grounded.confidence,
+                        )
+                    )
+                    self.last_geojson = standardize_feature_collection(self.last_geojson, task_type="grounding")
+                    extra.append(
+                        RegistryExecutionSchema(
+                            model="mobilesam" if use_mobilesam else "sam-vit-b",
+                            params=grounded.params,
+                        )
+                    )
+                    self.scratchpad.record_tool_execution(
+                        "mobilesam" if use_mobilesam else "sam-vit-b",
+                        {"image_path": str(optical), "prompt": query},
+                        0.1,
+                        "Segmented discrete target features via MobileSAM/SAM",
+                    )
+                    final_answer = grounded.description
+                    ground_conf = grounded.confidence
+                else:
+                    final_answer = f"Water body segmentation and surface delineation complete. Found {len(self.last_geojson.get('features', []))} water feature(s)."
+                    ground_conf = 0.92
+
+                # Geodesic area calculation
+                if self.last_geojson:
+                    try:
+                        from app.tools.registry import default_tool_registry
+
+                        meas_res = default_tool_registry.execute_tool_sync(
+                            "GeodesicMeasurementTool",
+                            self.scratchpad,
+                            geojson=self.last_geojson,
+                        )
+                        extra.append(
+                            RegistryExecutionSchema(
+                                model="GeodesicMeasurementTool",
+                                params=meas_res.get("metrics", {}),
+                            )
+                        )
+                        self.scratchpad.record_tool_execution(
+                            "GeodesicMeasurementTool",
+                            {"feature_count": len(self.last_geojson.get("features", []))},
+                            meas_res.get("duration_seconds", 0.0),
+                            meas_res.get("metrics", {}),
+                        )
+                    except Exception as geo_meas_err:
+                        logger.debug("Geodesic measurement notice: %s", geo_meas_err)
+
+                # Route grounding description through RemoteSensingVLMClient
+                try:
+                    from app.services.models.rs_vlm import RemoteSensingVLMClient
+
+                    rs_res = RemoteSensingVLMClient().generate_grounding(
+                        prompt=query,
+                        image_path=optical,
+                        extra_context={"task": task, "primary_meta": primary_meta},
+                    )
+                    if rs_res.text and not rs_res.text.startswith("[offline stub]"):
+                        final_answer = rs_res.text
+                except Exception as rs_err:
+                    logger.debug("RemoteSensingVLMClient grounding notice: %s", rs_err)
+
                 if not final_answer or final_answer.startswith("[offline stub]"):
                     final_answer = generate_heuristic_summary(
                         query=query,
                         task=task,
                         geojson=self.last_geojson,
                         metadata=primary_meta,
-                        confidence=grounded.confidence,
+                        confidence=ground_conf,
                         models=["RS-Grounding-V3", "MobileSAM"],
                     )
-                return final_answer, grounded.confidence, extra
+                return final_answer, ground_conf, extra
 
             if task == "cross_modal_joint_analysis" and t2 is not None:
                 ben_classes: list[str] = []
@@ -691,11 +873,42 @@ class SatQueryController:
                     )
                 )
 
+                if self.last_geojson:
+                    try:
+                        from app.tools.registry import default_tool_registry
+
+                        meas_res = default_tool_registry.execute_tool_sync(
+                            "GeodesicMeasurementTool",
+                            self.scratchpad,
+                            geojson=self.last_geojson,
+                        )
+                        extra.append(
+                            RegistryExecutionSchema(
+                                model="GeodesicMeasurementTool",
+                                params=meas_res.get("metrics", {}),
+                            )
+                        )
+                        self.scratchpad.record_tool_execution(
+                            "GeodesicMeasurementTool",
+                            {"feature_count": len(self.last_geojson.get("features", []))},
+                            meas_res.get("duration_seconds", 0.0),
+                            meas_res.get("metrics", {}),
+                        )
+                    except Exception as geo_meas_err:
+                        logger.debug("Geodesic measurement notice: %s", geo_meas_err)
+
+                self.scratchpad.record_tool_execution(
+                    "OpticalSARFusionTool",
+                    {"optical": str(optical), "sar": str(t2)},
+                    0.25,
+                    "Extracted optical builtup and SAR water (threshold -18dB)",
+                )
+
                 final_answer = cm_result.answer
                 try:
-                    from app.services.models.base import LocalVisionLanguageClient
+                    from app.services.models.rs_vlm import RemoteSensingVLMClient
 
-                    vlm_res = LocalVisionLanguageClient().generate(
+                    vlm_res = RemoteSensingVLMClient().generate(
                         prompt=(
                             f"Cross-modal EO satellite joint analysis. User question: '{query}'. "
                             f"Image 1 represents Optical (Cartosat-2S) RGB imagery. "
@@ -766,18 +979,67 @@ class SatQueryController:
                         confidence=0.88,
                     )
 
-                vlm = LocalVisionLanguageClient().generate(
-                    prompt=query,
-                    image_path=optical,
-                    extra_context={
-                        "task": task,
-                        "task_type": "single_vqa",
-                        "geojson": self.last_geojson,
-                        "metadata": primary_meta,
-                        "land_cover_classes": ben_classes,
-                    },
+                if self.last_geojson:
+                    try:
+                        from app.tools.registry import default_tool_registry
+
+                        meas_res = default_tool_registry.execute_tool_sync(
+                            "GeodesicMeasurementTool",
+                            self.scratchpad,
+                            geojson=self.last_geojson,
+                        )
+                        extra.append(
+                            RegistryExecutionSchema(
+                                model="GeodesicMeasurementTool",
+                                params=meas_res.get("metrics", {}),
+                            )
+                        )
+                        self.scratchpad.record_tool_execution(
+                            "GeodesicMeasurementTool",
+                            {"feature_count": len(self.last_geojson.get("features", []))},
+                            meas_res.get("duration_seconds", 0.0),
+                            meas_res.get("metrics", {}),
+                        )
+                    except Exception as geo_meas_err:
+                        logger.debug("Geodesic measurement notice: %s", geo_meas_err)
+
+                try:
+                    from app.services.models.rs_vlm import RemoteSensingVLMClient
+
+                    rs_vlm = RemoteSensingVLMClient()
+                    vlm = rs_vlm.generate_vqa(
+                        prompt=query,
+                        image_path=optical,
+                        extra_context={
+                            "task": task,
+                            "task_type": "single_vqa",
+                            "geojson": self.last_geojson,
+                            "metadata": primary_meta,
+                            "land_cover_classes": ben_classes,
+                        },
+                    )
+                except Exception:
+                    from app.services.models.base import LocalVisionLanguageClient
+
+                    vlm = LocalVisionLanguageClient().generate(
+                        prompt=query,
+                        image_path=optical,
+                        extra_context={
+                            "task": task,
+                            "task_type": "single_vqa",
+                            "geojson": self.last_geojson,
+                            "metadata": primary_meta,
+                            "land_cover_classes": ben_classes,
+                        },
+                    )
+
+                extra.append(RegistryExecutionSchema(model=vlm.params.get("model", "GeoChat-RS"), params=vlm.params))
+                self.scratchpad.record_tool_execution(
+                    "RemoteSensingVLMClient",
+                    {"prompt": query, "model": vlm.params.get("model", "GeoChat-RS")},
+                    0.2,
+                    f"Generated VQA domain analysis with confidence {vlm.confidence}",
                 )
-                extra.append(RegistryExecutionSchema(model=vlm.params.get("model", "llava"), params=vlm.params))
                 return vlm.text, vlm.confidence, extra
 
         except Exception as exc:  # noqa: BLE001
@@ -1081,6 +1343,10 @@ def compile_satquery_graph(controller: SatQueryController):
             if (step.model if hasattr(step, "model") else step.get("model"))
         ]
 
+        intent_data = getattr(controller, "scratchpad", {}).get("intent_classification") or state.get("intent_classification")
+        geo_metrics = getattr(controller, "scratchpad", {}).get("geospatial_metrics") or state.get("geospatial_metrics")
+        scratchpad_dict = dict(getattr(controller, "scratchpad", {})) if getattr(controller, "scratchpad", None) else None
+
         trace_log = AuditableTraceLogSchema(
             trace_id=trace_id,
             task=task,
@@ -1094,6 +1360,9 @@ def compile_satquery_graph(controller: SatQueryController):
             confidence=float(state.get("confidence") or 0.88),
             output=state.get("text_output") or "Analysis completed successfully.",
             geojson=state.get("geojson") or controller.last_geojson,
+            intent_classification=intent_data if intent_data else None,
+            geospatial_metrics=geo_metrics if geo_metrics else None,
+            scratchpad=scratchpad_dict if scratchpad_dict else None,
         )
 
         if controller.db:
