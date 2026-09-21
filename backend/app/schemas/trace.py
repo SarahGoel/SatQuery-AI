@@ -33,6 +33,9 @@ class AuditableTraceLogSchema(BaseModel):
     confidence: Optional[float] = Field(default=None, description="Standard numeric confidence score")
     output: str = Field(..., description="Generated natural language response and spatial mappings [72, 73]")
     geojson: Optional[Dict[str, Any]] = Field(default=None, description="Standard FeatureCollection of discrete instances")
+    intent_classification: Optional[Dict[str, Any]] = Field(default=None, description="Semantic intent router classification decision")
+    geospatial_metrics: Optional[Dict[str, Any]] = Field(default=None, description="Calculated surface area and geospatial bounding metrics")
+    scratchpad: Optional[Dict[str, Any]] = Field(default=None, description="Agent intermediate scratchpad log")
 
     @model_validator(mode="before")
     @classmethod
