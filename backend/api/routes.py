@@ -464,7 +464,11 @@ async def query_pipeline(
         (report_dir / json_name).write_bytes(json_body)
 
         std_task = trace.task_type or getattr(trace, "task", "single_vqa")
-        models_executed = trace.models_executed or [step.model for step in trace.registry_execution if step.model]
+        models_executed = trace.models_executed or [
+            step.model
+            for step in (getattr(trace, "tools_executed", None) or trace.registry_execution)
+            if step.model
+        ]
         input_meta = trace.input_metadata.model_dump()
         conf = float(trace.confidence if trace.confidence is not None else trace.confidence_score)
 

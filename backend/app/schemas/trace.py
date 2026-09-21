@@ -2,7 +2,7 @@
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class InputMetadataSchema(BaseModel):
@@ -17,7 +17,7 @@ class InputMetadataSchema(BaseModel):
 
 class RegistryExecutionSchema(BaseModel):
     model: str = Field(..., description="Name of the selected specialist model [68, 71]")
-    params: Dict[str, Any] = Field(..., description="Runtime parameter configuration passed to the model [69, 71]")
+    params: Dict[str, Any] = Field(default_factory=dict, description="Runtime parameter configuration passed to the model [69, 71]")
 
 
 class AuditableTraceLogSchema(BaseModel):
@@ -26,9 +26,25 @@ class AuditableTraceLogSchema(BaseModel):
     task_type: Optional[str] = Field(default=None, description="Standardized task type [single_grounding, single_vqa, bitemporal_change, cross_modal]")
     query: str = Field(..., description="Original user natural language query [69, 72]")
     input_metadata: InputMetadataSchema
-    registry_execution: List[RegistryExecutionSchema]
+    registry_execution: List[RegistryExecutionSchema] = Field(default_factory=list, description="List of executed specialist model configurations")
+    tools_executed: List[RegistryExecutionSchema] = Field(default_factory=list, description="List of executed specialist tool configurations")
     models_executed: List[str] = Field(default_factory=list, description="List of model identifiers executed")
     confidence_score: float = Field(..., description="Calculated confidence of the output [69, 72]")
     confidence: Optional[float] = Field(default=None, description="Standard numeric confidence score")
     output: str = Field(..., description="Generated natural language response and spatial mappings [72, 73]")
     geojson: Optional[Dict[str, Any]] = Field(default=None, description="Standard FeatureCollection of discrete instances")
+
+    @model_validator(mode="before")
+    @classmethod
+    def sync_tools_and_registry(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            reg = data.get("registry_execution")
+            tools = data.get("tools_executed")
+            if tools is not None and not reg:
+                data["registry_execution"] = tools
+            elif reg is not None and not tools:
+                data["tools_executed"] = reg
+            elif tools is None and reg is None:
+                data["registry_execution"] = []
+                data["tools_executed"] = []
+        return data
