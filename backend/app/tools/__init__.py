@@ -4,6 +4,7 @@ from app.tools.base import BaseTool
 from app.tools.registry import (
     GeodesicMeasurementTool,
     OpticalSARFusionTool,
+    RemoteCLIPTemporalEncoder,
     TemporalChangeTool,
     ToolRegistry,
     WaterGroundingTool,
@@ -15,7 +16,9 @@ __all__ = [
     "ToolRegistry",
     "WaterGroundingTool",
     "TemporalChangeTool",
+    "RemoteCLIPTemporalEncoder",
     "OpticalSARFusionTool",
     "GeodesicMeasurementTool",
     "default_tool_registry",
 ]
+
