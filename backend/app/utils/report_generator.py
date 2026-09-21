@@ -18,7 +18,7 @@ def build_audit_summary(
 ) -> dict[str, Any]:
     """Compact audit payload: task, tools, parameters, and confidence scores."""
     data = _as_trace_dict(trace)
-    steps = list(data.get("registry_execution") or [])
+    steps = list(data.get("tools_executed") or data.get("registry_execution") or [])
     models = [str(step.get("model")) for step in steps if step.get("model")]
     key_parameters = {
         str(step.get("model")): dict(step.get("params") or {})

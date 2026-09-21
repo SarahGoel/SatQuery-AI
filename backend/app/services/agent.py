@@ -313,6 +313,7 @@ class SatQueryController:
                     band_count=0,
                 ),
                 registry_execution=execution_pipeline,
+                tools_executed=execution_pipeline,
                 models_executed=["LocalVisionLanguageClient"],
                 confidence_score=confidence,
                 confidence=confidence,
@@ -461,6 +462,7 @@ class SatQueryController:
                 band_count=primary_meta.get("band_count", 3),
             ),
             registry_execution=execution_pipeline,
+            tools_executed=execution_pipeline,
             models_executed=models_executed,
             confidence_score=confidence,
             confidence=confidence,
@@ -807,12 +809,15 @@ class SatQueryController:
             final_output=trace.output,
         )
         self.db.add(record)
-        for order, step in enumerate(trace.registry_execution, start=1):
+        trace_steps = getattr(trace, "tools_executed", None) or getattr(trace, "registry_execution", None) or []
+        for order, step in enumerate(trace_steps, start=1):
+            model_name = step.model if hasattr(step, "model") else (step.get("model") if isinstance(step, dict) else "RS-Grounding-V3")
+            params = step.params if hasattr(step, "params") else (step.get("params", {}) if isinstance(step, dict) else {})
             self.db.add(
                 TraceModelExecution(
                     trace_id=trace.trace_id,
-                    model_name=step.model if step.model in REGISTRY_MODELS else "RS-Grounding-V3",
-                    parameter_configuration=step.params,
+                    model_name=model_name if model_name in REGISTRY_MODELS else "RS-Grounding-V3",
+                    parameter_configuration=params,
                     execution_order=order,
                 )
             )
@@ -1070,7 +1075,11 @@ def compile_satquery_graph(controller: SatQueryController):
             )
 
         steps = list(state.get("execution_pipeline") or [])
-        models_executed = [step.model for step in steps if step.model]
+        models_executed = [
+            (step.model if hasattr(step, "model") else step.get("model"))
+            for step in steps
+            if (step.model if hasattr(step, "model") else step.get("model"))
+        ]
 
         trace_log = AuditableTraceLogSchema(
             trace_id=trace_id,
@@ -1079,6 +1088,7 @@ def compile_satquery_graph(controller: SatQueryController):
             query=state["query"],
             input_metadata=input_meta,
             registry_execution=steps,
+            tools_executed=steps,
             models_executed=models_executed,
             confidence_score=float(state.get("confidence") or 0.88),
             confidence=float(state.get("confidence") or 0.88),
