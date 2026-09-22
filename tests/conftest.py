@@ -6,10 +6,15 @@ unit test runs while allowing explicit live model and integration testing.
 
 from __future__ import annotations
 
+import os
+import sys
+
+
 from typing import Any
 import pytest
 
-from app.services.models.base import VLMResult
+
+
 
 
 @pytest.fixture(autouse=True)
@@ -30,7 +35,7 @@ def mock_vlm_for_unit_tests(monkeypatch: pytest.MonkeyPatch, request: pytest.Fix
         images: Any = None,
         extra_context: Any = None,
         **kwargs: Any,
-    ) -> VLMResult:
+    ) -> Any:
         ctx = dict(extra_context or {})
         if ctx.get("is_directional") and ctx.get("directional_verdict"):
             mock_text = str(ctx["directional_verdict"])
@@ -38,7 +43,7 @@ def mock_vlm_for_unit_tests(monkeypatch: pytest.MonkeyPatch, request: pytest.Fix
             mock_text = f"{ctx['direction_label']} Analysis indicates surface alterations."
         else:
             mock_text = f"Satellite observation analysis: '{prompt.strip()[:80]}'. The Sentinel-1 SAR constellation confirms stable surface features."
-        return VLMResult(
+        return Any(
             text=mock_text,
             confidence=0.92,
             params={"backend": "ollama", "model": "llava", "mocked": True, **ctx},

@@ -1,1 +1,0 @@
-"""SatQuery AI application package."""
