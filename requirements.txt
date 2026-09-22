@@ -24,3 +24,13 @@ python-dotenv==1.0.1
 requests==2.31.0
 pytest==8.0.2
 httpx==0.27.0
+# Testing dependencies
+pytest
+pytest-asyncio
+pytest-mock
+
+# Deep Inference & Geospatial dependencies (Phase 2.5)
+torch
+torchvision
+peft
+opencv-python-headless
