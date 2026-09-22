@@ -1,0 +1,51 @@
+# BigEarthNet CORINE Land Cover conversion
+# Maps the original 43-class CLC Level-3 schema onto the compact 19-class
+# nomenclature used to align visual structures with VQA / grounding text prompts.
+#
+# Format: CLC_CODE | ORIGINAL_CLASS | CLASS19_ID | CLASS19_NAME
+# CLASS19_ID of -1 means the class is dropped (too rare in BigEarthNet).
+
+111 | Continuous urban fabric | 0 | Urban fabric
+112 | Discontinuous urban fabric | 0 | Urban fabric
+121 | Industrial or commercial units | 1 | Industrial or commercial units
+122 | Road and rail networks and associated land | -1 | DROPPED
+123 | Port areas | -1 | DROPPED
+124 | Airports | -1 | DROPPED
+131 | Mineral extraction sites | -1 | DROPPED
+132 | Dump sites | -1 | DROPPED
+133 | Construction sites | -1 | DROPPED
+141 | Green urban areas | -1 | DROPPED
+142 | Sport and leisure facilities | -1 | DROPPED
+211 | Non-irrigated arable land | 2 | Arable land
+212 | Permanently irrigated land | 2 | Arable land
+213 | Rice fields | 2 | Arable land
+221 | Vineyards | 3 | Permanent crops
+222 | Fruit trees and berry plantations | 3 | Permanent crops
+223 | Olive groves | 3 | Permanent crops
+231 | Pastures | 4 | Pastures
+241 | Annual crops associated with permanent crops | 5 | Complex cultivation patterns
+242 | Complex cultivation patterns | 5 | Complex cultivation patterns
+243 | Land principally occupied by agriculture, with significant areas of natural vegetation | 6 | Land principally occupied by agriculture, with significant areas of natural vegetation
+244 | Agro-forestry areas | 7 | Agro-forestry areas
+311 | Broad-leaved forest | 8 | Broad-leaved forest
+312 | Coniferous forest | 9 | Coniferous forest
+313 | Mixed forest | 10 | Mixed forest
+321 | Natural grassland | 11 | Natural grassland and sparsely vegetated areas
+322 | Moors and heathland | 12 | Moors, heathland and sclerophyllous vegetation
+323 | Sclerophyllous vegetation | 12 | Moors, heathland and sclerophyllous vegetation
+324 | Transitional woodland-shrub | 13 | Transitional woodland/shrub
+331 | Beaches, dunes, sands | 14 | Beaches, dunes, sands
+332 | Bare rocks | 11 | Natural grassland and sparsely vegetated areas
+333 | Sparsely vegetated areas | 11 | Natural grassland and sparsely vegetated areas
+334 | Burnt areas | -1 | DROPPED
+335 | Glaciers and perpetual snow | -1 | DROPPED
+411 | Inland marshes | 15 | Inland wetlands
+412 | Peat bogs | 15 | Inland wetlands
+421 | Salt marshes | 16 | Coastal wetlands
+422 | Salines | 16 | Coastal wetlands
+423 | Intertidal flats | 16 | Coastal wetlands
+511 | Water courses | 17 | Inland waters
+512 | Water bodies | 17 | Inland waters
+521 | Coastal lagoons | 18 | Marine waters
+522 | Estuaries | 18 | Marine waters
+523 | Sea and ocean | 18 | Marine waters
