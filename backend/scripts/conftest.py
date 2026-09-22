@@ -1,21 +1,16 @@
-"""Global test configuration and fixtures for SatQuery AI.
-
-Mocks heavy multi-billion-parameter neural network inference during standard
-unit test runs while allowing explicit live model and integration testing.
-"""
+"""Test configuration and fixtures for scripts."""
 
 from __future__ import annotations
 
 from typing import Any
 import pytest
 
-
+from app.services.models.base import VLMResult
 
 
 @pytest.fixture(autouse=True)
 def mock_vlm_for_unit_tests(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
     """Mocks LocalVisionLanguageClient.generate for fast, deterministic unit test runs."""
-    # Allow tests that specifically probe the client methods to run unmocked
     if (
         "live_model" in request.keywords
         or "test_vlm_client_candidate_endpoints" in request.node.nodeid
@@ -30,7 +25,7 @@ def mock_vlm_for_unit_tests(monkeypatch: pytest.MonkeyPatch, request: pytest.Fix
         images: Any = None,
         extra_context: Any = None,
         **kwargs: Any,
-    ) -> Any:
+    ) -> VLMResult:
         ctx = dict(extra_context or {})
         if ctx.get("is_directional") and ctx.get("directional_verdict"):
             mock_text = str(ctx["directional_verdict"])
@@ -38,7 +33,7 @@ def mock_vlm_for_unit_tests(monkeypatch: pytest.MonkeyPatch, request: pytest.Fix
             mock_text = f"{ctx['direction_label']} Analysis indicates surface alterations."
         else:
             mock_text = f"Satellite observation analysis: '{prompt.strip()[:80]}'. The Sentinel-1 SAR constellation confirms stable surface features."
-        return Any(
+        return VLMResult(
             text=mock_text,
             confidence=0.92,
             params={"backend": "ollama", "model": "llava", "mocked": True, **ctx},
