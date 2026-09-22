@@ -152,9 +152,14 @@ RUN ldconfig && gdal-config --version
 
 WORKDIR /app
 
+ENV PYTHONPATH=/app:/app/backend
+
 COPY backend /app/backend
 COPY models /app/models
 COPY scripts /app/scripts
+COPY tests /app/tests
+COPY pytest.ini /app/pytest.ini
+
 
 RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin satquery \
     && mkdir -p \
