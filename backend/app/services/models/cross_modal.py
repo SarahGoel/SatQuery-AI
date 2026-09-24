@@ -279,15 +279,131 @@ class CrossModalAnalysisTool:
         sar_path: Path,
         query: str,
     ) -> CrossModalResult:
-        """Executes joint cross-modal information extraction."""
+        """Executes joint cross-modal information extraction with automatic spatial co-registration."""
+        optical_path = Path(optical_path)
+        sar_path = Path(sar_path)
+
         logger.info(
             "Specialist workflow: Optical-SAR Joint Information Extraction (Optical: %s, SAR: %s)",
             optical_path.name,
             sar_path.name,
         )
 
+        # Pre-flight spatial bounds & pixel dimension inspection
+        aligned_sar_path = sar_path
+        need_alignment = False
+
+        try:
+            with rasterio.open(optical_path) as s_opt, rasterio.open(sar_path) as s_sar:
+                opt_shape = (s_opt.height, s_opt.width)
+                sar_shape = (s_sar.height, s_sar.width)
+                opt_bounds = s_opt.bounds
+                sar_bounds = s_sar.bounds
+                opt_crs = s_opt.crs
+                sar_crs = s_sar.crs
+
+                if (
+                    opt_shape != sar_shape
+                    or opt_bounds != sar_bounds
+                    or (opt_crs and sar_crs and opt_crs != sar_crs)
+                ):
+                    need_alignment = True
+                    logger.info(
+                        "Cross-modal spatial discrepancy detected: optical shape=%s bounds=%s crs=%s vs SAR shape=%s bounds=%s crs=%s",
+                        opt_shape,
+                        opt_bounds,
+                        opt_crs,
+                        sar_shape,
+                        sar_bounds,
+                        sar_crs,
+                    )
+        except Exception:
+            try:
+                from PIL import Image
+                with Image.open(optical_path) as img_opt, Image.open(sar_path) as img_sar:
+                    if img_opt.size != img_sar.size:
+                        need_alignment = True
+                        logger.info(
+                            "Cross-modal pixel dimension discrepancy detected: optical size=%s vs SAR size=%s",
+                            img_opt.size,
+                            img_sar.size,
+                        )
+            except Exception as read_err:
+                logger.debug("Cross-modal pre-flight inspection fallback: %s", read_err)
+
+        if need_alignment:
+            logger.info("Executing spatial co-registration: warping secondary SAR raster onto reference optical grid.")
+            aligned = False
+
+            # Strategy 1: SpatialAligner (CRS reprojection + Lanczos4 grid resampling + SIFT/RANSAC)
+            try:
+                from app.services.geospatial.alignment import SpatialAligner
+                aligner = SpatialAligner()
+                res = aligner.align(reference=optical_path, moving=sar_path)
+                if res and res.moving_path and Path(res.moving_path).exists():
+                    aligned_sar_path = Path(res.moving_path)
+                    aligned = True
+                    logger.info("Successfully warped SAR raster via SpatialAligner: %s", aligned_sar_path)
+            except Exception as align_err:
+                logger.warning("SpatialAligner encountered error: %s. Attempting rasterio warping fallback.", align_err)
+
+            # Strategy 2: Rasterio warp onto reference optical grid
+            if not aligned:
+                try:
+                    from rasterio.warp import reproject, Resampling
+                    from app.core.config import settings
+
+                    work_dir = settings.ARTIFACT_DIR / "alignment" / "cross_modal"
+                    work_dir.mkdir(parents=True, exist_ok=True)
+                    fallback_warped = work_dir / f"{sar_path.stem}_aligned.tif"
+
+                    with rasterio.open(optical_path) as ref_ds, rasterio.open(sar_path) as src_ds:
+                        profile = ref_ds.profile.copy()
+                        profile.update({
+                            "count": 1,
+                            "dtype": "float32",
+                            "driver": "GTiff",
+                        })
+                        ref_crs = ref_ds.crs or "EPSG:4326"
+                        src_crs = src_ds.crs or ref_crs
+                        with rasterio.open(fallback_warped, "w", **profile) as dst_ds:
+                            reproject(
+                                source=rasterio.band(src_ds, 1),
+                                destination=rasterio.band(dst_ds, 1),
+                                src_transform=src_ds.transform,
+                                src_crs=src_crs,
+                                dst_transform=ref_ds.transform,
+                                dst_crs=ref_crs,
+                                resampling=Resampling.bilinear,
+                            )
+                    aligned_sar_path = fallback_warped
+                    aligned = True
+                    logger.info("Successfully warped SAR raster via rasterio fallback: %s", aligned_sar_path)
+                except Exception as fb_err:
+                    logger.warning("Rasterio warp fallback failed: %s. Attempting PIL resize fallback.", fb_err)
+
+            # Strategy 3: PIL dimension resize fallback (for non-georeferenced benchmark pairs)
+            if not aligned:
+                try:
+                    from PIL import Image
+                    from app.core.config import settings
+
+                    work_dir = settings.ARTIFACT_DIR / "alignment" / "cross_modal"
+                    work_dir.mkdir(parents=True, exist_ok=True)
+                    pil_warped = work_dir / f"{sar_path.stem}_aligned.png"
+
+                    with Image.open(optical_path) as p_ref, Image.open(sar_path) as p_mov:
+                        ref_w, ref_h = p_ref.size
+                        p_mov_resized = p_mov.resize((ref_w, ref_h), Image.Resampling.BILINEAR)
+                        p_mov_resized.save(pil_warped)
+                        aligned_sar_path = pil_warped
+                        aligned = True
+                        logger.info("Successfully resized SAR raster via PIL fallback: %s", aligned_sar_path)
+                except Exception as pil_err:
+                    logger.error("All alignment strategies failed: %s. Proceeding with unaligned SAR raster.", pil_err)
+
         builtup_features, opt_affine, opt_crs, opt_shape = self.extract_optical_builtup(optical_path)
-        water_features, sar_affine, sar_crs, sar_shape = self.extract_sar_water(sar_path)
+        water_features, sar_affine, sar_crs, sar_shape = self.extract_sar_water(aligned_sar_path)
 
         all_features = builtup_features + water_features
         crs = opt_crs or sar_crs or "EPSG:4326"
@@ -324,6 +440,7 @@ class CrossModalAnalysisTool:
             "water_features_count": num_water,
             "total_features": len(all_features),
             "crs": crs,
+            "co_registered": need_alignment,
         }
 
         return CrossModalResult(
