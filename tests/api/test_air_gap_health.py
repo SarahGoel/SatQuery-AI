@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from backend.api.routes_health import WEIGHT_SUBDIRS, probe_air_gap
+try:
+    from backend.api.routes_health import WEIGHT_SUBDIRS, probe_air_gap
+except ImportError:
+    from api.routes_health import WEIGHT_SUBDIRS, probe_air_gap
+
 
 
 def test_air_gap_not_ready_when_missing(tmp_path: Path) -> None:

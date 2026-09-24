@@ -9,6 +9,18 @@ from __future__ import annotations
 from typing import Any
 import pytest
 
+try:
+    from app.services.models.base import VLMResult
+except Exception as exc:
+    import traceback
+    traceback.print_exc()
+    import sys
+    print("DEBUG: sys.path is", sys.path)
+    print("DEBUG: sys.modules['app'] is", sys.modules.get('app'))
+    if 'app' in sys.modules:
+        print("DEBUG: app.__path__ is", getattr(sys.modules['app'], '__path__', None))
+        print("DEBUG: app.__file__ is", getattr(sys.modules['app'], '__file__', None))
+    raise
 
 
 
@@ -30,7 +42,7 @@ def mock_vlm_for_unit_tests(monkeypatch: pytest.MonkeyPatch, request: pytest.Fix
         images: Any = None,
         extra_context: Any = None,
         **kwargs: Any,
-    ) -> Any:
+    ) -> VLMResult:
         ctx = dict(extra_context or {})
         if ctx.get("is_directional") and ctx.get("directional_verdict"):
             mock_text = str(ctx["directional_verdict"])
@@ -38,7 +50,7 @@ def mock_vlm_for_unit_tests(monkeypatch: pytest.MonkeyPatch, request: pytest.Fix
             mock_text = f"{ctx['direction_label']} Analysis indicates surface alterations."
         else:
             mock_text = f"Satellite observation analysis: '{prompt.strip()[:80]}'. The Sentinel-1 SAR constellation confirms stable surface features."
-        return Any(
+        return VLMResult(
             text=mock_text,
             confidence=0.92,
             params={"backend": "ollama", "model": "llava", "mocked": True, **ctx},
