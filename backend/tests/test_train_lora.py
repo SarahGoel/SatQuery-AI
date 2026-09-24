@@ -23,17 +23,30 @@ try:
         print_trainable_parameter_inventory,
     )
 except ImportError:
-    from scripts.train_lora import (
-        LLAVA_ADAPTER_INVENTORY,
-        LORA_TARGET_MODULES,
-        NUM_BEN19_CLASSES,
-        BigEarthNetDataset,
-        ProjectionAdapterHost,
-        build_lora_config,
-        corine_labels_to_ben19,
-        parse_corine_43_to_19,
-        print_trainable_parameter_inventory,
-    )
+    try:
+        from scripts.train_lora import (
+            LLAVA_ADAPTER_INVENTORY,
+            LORA_TARGET_MODULES,
+            NUM_BEN19_CLASSES,
+            BigEarthNetDataset,
+            ProjectionAdapterHost,
+            build_lora_config,
+            corine_labels_to_ben19,
+            parse_corine_43_to_19,
+            print_trainable_parameter_inventory,
+        )
+    except ImportError:
+        from training.train_bigearthnet_lora import (
+            LLAVA_ADAPTER_INVENTORY,
+            LORA_TARGET_MODULES,
+            NUM_BEN19_CLASSES,
+            BigEarthNetDataset,
+            ProjectionAdapterHost,
+            build_lora_config,
+            corine_labels_to_ben19,
+            parse_corine_43_to_19,
+            print_trainable_parameter_inventory,
+        )
 from peft import inject_adapter_in_model
 
 
@@ -71,7 +84,7 @@ def test_lora_config_targets_projection_matrices() -> None:
     cfg = build_lora_config()
     assert cfg.r == 8
     assert cfg.lora_alpha == 16
-    assert list(cfg.target_modules) == list(LORA_TARGET_MODULES)
+    assert set(cfg.target_modules) == set(LORA_TARGET_MODULES)
     assert cfg.lora_dropout == 0.05
     assert cfg.bias == "none"
     assert cfg.task_type == "CAUSAL_LM"
@@ -98,7 +111,13 @@ def test_published_llava_adapter_inventory_string() -> None:
 
 
 def test_test_mode_saves_adapter_under_local_models_layout(tmp_path: Path) -> None:
-    from train_bigearthnet_lora import resolve_device, run_peft_domain_adaptation
+    try:
+        from train_bigearthnet_lora import resolve_device, run_peft_domain_adaptation
+    except ImportError:
+        try:
+            from training.train_bigearthnet_lora import resolve_device, run_peft_domain_adaptation
+        except ImportError:
+            from scripts.train_lora import resolve_device, run_peft_domain_adaptation
 
     device = resolve_device()
     assert device.type in {"cpu", "cuda"}

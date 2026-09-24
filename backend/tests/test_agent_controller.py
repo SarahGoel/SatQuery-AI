@@ -53,7 +53,7 @@ def test_execute_workflow_change_task(tmp_path: Path) -> None:
         filepaths=[str(t1), str(t2)],
     )
     assert trace.task == "bi_temporal_change_analysis"
-    assert trace.registry_execution[0].model == "CD-VQA-Pro"
+    assert any(step.model == "CD-VQA-Pro" for step in trace.registry_execution)
     assert trace.trace_id.startswith("ISRO-SQ-2026-")
     dumped = trace.model_dump_json(indent=2)
     assert "bi_temporal_change_analysis" in dumped

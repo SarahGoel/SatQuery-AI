@@ -10,16 +10,30 @@ import pytest
 import rasterio
 from rasterio.transform import from_bounds
 
-from backend.preprocessing.alignment import AlignmentError, SubPixelAligner
-from backend.preprocessing.core import (
-    SAR_DB_CEILING,
-    SAR_DB_FLOOR,
-    RasterProcessingError,
-    RasterProcessor,
-)
-from backend.preprocessing.spectral import SpectralIndexError, calculate_ndvi, calculate_ndwi
+try:
+    from backend.preprocessing.alignment import AlignmentError, SubPixelAligner
+    from backend.preprocessing.core import (
+        SAR_DB_CEILING,
+        SAR_DB_FLOOR,
+        RasterProcessingError,
+        RasterProcessor,
+    )
+    from backend.preprocessing.spectral import SpectralIndexError, calculate_ndvi, calculate_ndwi
+except ImportError:
+    from preprocessing.alignment import AlignmentError, SubPixelAligner
+    from preprocessing.core import (
+        SAR_DB_CEILING,
+        SAR_DB_FLOOR,
+        RasterProcessingError,
+        RasterProcessor,
+    )
+    from preprocessing.spectral import SpectralIndexError, calculate_ndvi, calculate_ndwi
 
-from scripts.download_datasets import DATASET_LAYOUT, DatasetDownloadManager
+try:
+    from scripts.download_datasets import DATASET_LAYOUT, DatasetDownloadManager
+except ImportError:
+    from download_datasets import DATASET_LAYOUT, DatasetDownloadManager
+
 
 
 def test_ndvi_formula_and_zero_division() -> None:

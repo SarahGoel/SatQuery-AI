@@ -26,10 +26,17 @@ from app.services.models.bigearthnet import (
 )
 from app.services.agent import SatQueryController, _compute_proportional_bounds
 from app.agents.router import InputInspectorNode
-from backend.api.routes import (
-    _calculate_proportional_bounds,
-    _extract_exif_gps_bounds,
-)
+try:
+    from backend.api.routes import (
+        _calculate_proportional_bounds,
+        _extract_exif_gps_bounds,
+    )
+except ImportError:
+    from api.routes import (
+        _calculate_proportional_bounds,
+        _extract_exif_gps_bounds,
+    )
+
 
 
 def _create_geotiff(path: Path, west: float, south: float, east: float, north: float, bands: int = 4, w: int = 64, h: int = 64) -> Path:
@@ -276,6 +283,7 @@ def test_config_docker_and_host_url_resolution(monkeypatch: Any) -> None:
     with patch("os.path.exists", return_value=False):
         monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
         monkeypatch.delenv("OLLAMA_HOST", raising=False)
+        monkeypatch.delenv("DATABASE_URL", raising=False)
         host_settings = Settings()
         assert host_settings.resolved_ollama_url == "http://localhost:11434"
         assert "localhost:5432" in host_settings.DATABASE_URL
@@ -284,6 +292,7 @@ def test_config_docker_and_host_url_resolution(monkeypatch: Any) -> None:
     with patch("os.path.exists", lambda p: True if p == "/.dockerenv" else False):
         monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
         monkeypatch.delenv("OLLAMA_HOST", raising=False)
+        monkeypatch.delenv("DATABASE_URL", raising=False)
         docker_settings = Settings()
         assert docker_settings.resolved_ollama_url == "http://ollama:11434"
         assert "db:5432" in docker_settings.DATABASE_URL

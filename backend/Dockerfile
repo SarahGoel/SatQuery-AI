@@ -78,6 +78,7 @@ RUN pip3 install --upgrade pip \
     && pip3 install --no-cache-dir -r requirements.txt
 
 COPY . .
+RUN rm -f /app/__init__.py
 
 RUN mkdir -p \
         /local_models/sam \

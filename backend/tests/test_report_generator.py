@@ -8,7 +8,11 @@ from app.utils.report_generator import (
     generate_audit_report,
 )
 from app.utils.trace_store import remember_trace
-from backend.utils.report_generator import generate_audit_report as public_generate
+try:
+    from backend.utils.report_generator import generate_audit_report as public_generate
+except ImportError:
+    from utils.report_generator import generate_audit_report as public_generate
+
 
 
 def _sample_trace() -> dict:
