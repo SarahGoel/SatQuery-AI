@@ -76,6 +76,25 @@ def parse_geochat_bbox(text: str) -> Optional[List[float]]:
         if paren_match:
             raw_coords = [float(paren_match.group(i)) for i in range(1, 5)]
 
+    # 4. Look for comma-separated numbers anywhere in text
+    if raw_coords is None:
+        quad_match = re.search(
+            r"\b(\d{1,4}(?:\.\d+)?)\s*,\s*(\d{1,4}(?:\.\d+)?)\s*,\s*(\d{1,4}(?:\.\d+)?)\s*,\s*(\d{1,4}(?:\.\d+)?)\b",
+            text,
+        )
+        if quad_match:
+            raw_coords = [float(quad_match.group(i)) for i in range(1, 5)]
+
+    # 5. Look for named coordinates ymin/xmin/ymax/xmax
+    if raw_coords is None:
+        named_match = re.search(
+            r"ymin\s*[:=]\s*(\d+(?:\.\d+)?).*?xmin\s*[:=]\s*(\d+(?:\.\d+)?).*?ymax\s*[:=]\s*(\d+(?:\.\d+)?).*?xmax\s*[:=]\s*(\d+(?:\.\d+)?)",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if named_match:
+            raw_coords = [float(named_match.group(i)) for i in range(1, 5)]
+
     if raw_coords is None:
         return None
 
@@ -212,12 +231,33 @@ def extract_and_transform_bbox(
         raw_bbox = [box0[1], box0[0], box0[3], box0[2]]
 
     if raw_bbox is None:
-        logger.info("No coordinates detected in model output; applying synthetic ISRO SAC fallback")
-        half_span = ISRO_SAC_SPAN_DEG / 2.0
-        min_lon = round(ISRO_SAC_LON - half_span, 6)
-        max_lon = round(ISRO_SAC_LON + half_span, 6)
-        min_lat = round(ISRO_SAC_LAT - half_span, 6)
-        max_lat = round(ISRO_SAC_LAT + half_span, 6)
+        dynamic_bbox = None
+        path_obj = Path(raster_path) if raster_path else None
+        if path_obj and path_obj.exists():
+            try:
+                with rasterio.open(path_obj) as src:
+                    if src.bounds and src.crs:
+                        from rasterio.warp import transform_bounds
+                        w_val, s_val, e_val, n_val = transform_bounds(
+                            src.crs, "EPSG:4326", src.bounds.left, src.bounds.bottom, src.bounds.right, src.bounds.top
+                        )
+                        dynamic_bbox = [round(float(w_val), 6), round(float(s_val), 6), round(float(e_val), 6), round(float(n_val), 6)]
+            except Exception:
+                pass
+
+        if dynamic_bbox:
+            min_lon, min_lat, max_lon, max_lat = dynamic_bbox
+            is_geo = True
+            center_coords = [round((min_lon + max_lon) / 2.0, 6), round((min_lat + max_lat) / 2.0, 6)]
+        else:
+            half_span = ISRO_SAC_SPAN_DEG / 2.0
+            min_lon = round(ISRO_SAC_LON - half_span, 6)
+            max_lon = round(ISRO_SAC_LON + half_span, 6)
+            min_lat = round(ISRO_SAC_LAT - half_span, 6)
+            max_lat = round(ISRO_SAC_LAT + half_span, 6)
+            is_geo = False
+            center_coords = [ISRO_SAC_LON, ISRO_SAC_LAT]
+
         fallback_ring = [
             [min_lon, max_lat],
             [max_lon, max_lat],
@@ -238,16 +278,16 @@ def extract_and_transform_bbox(
                 "category": "visual_grounding",
                 "source": "geochat_vlm",
                 "crs": "EPSG:4326",
-                "is_georeferenced": False,
-                "fallback": "ISRO_SAC_AHMEDABAD",
-                "center": [ISRO_SAC_LON, ISRO_SAC_LAT],
+                "is_georeferenced": is_geo,
+                "fallback": "DYNAMIC_GEOREFERENCED" if is_geo else "ISRO_SAC_AHMEDABAD",
+                "center": center_coords,
                 "bbox": bbox_wgs84,
             },
             "bbox": bbox_wgs84,
         }
         return {
             "status": "success",
-            "method": "synthetic_isro_sac",
+            "method": "dynamic_raster_extent" if is_geo else "synthetic_isro_sac",
             "bbox": None,
             "bbox_wgs84": bbox_wgs84,
             "pixel_bbox": None,

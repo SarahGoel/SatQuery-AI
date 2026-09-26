@@ -41,6 +41,9 @@ class AuditableTraceLogSchema(BaseModel):
     @classmethod
     def sync_tools_and_registry(cls, data: Any) -> Any:
         if isinstance(data, dict):
+            from app.schemas.validation import sanitize_for_json
+
+            data = sanitize_for_json(data)
             reg = data.get("registry_execution")
             tools = data.get("tools_executed")
             if tools is not None and not reg:

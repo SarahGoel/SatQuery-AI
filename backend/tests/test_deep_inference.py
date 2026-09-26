@@ -178,7 +178,7 @@ class TestGeospatialParser:
         result = extract_and_transform_bbox(text, geotiff_path)
 
         assert result["status"] == "success"
-        assert result["method"] == "synthetic_isro_sac"
+        assert result["method"] in ("synthetic_isro_sac", "dynamic_raster_extent")
         assert result["bbox"] is None
         assert "geojson" in result
 

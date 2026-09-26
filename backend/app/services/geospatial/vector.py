@@ -51,7 +51,7 @@ COLOR_BY_TASK = {
 
 CATEGORY_BY_TASK = {
     TASK_SINGLE_GROUNDING: "infrastructure",
-    TASK_CHANGE_DETECTION: "flood",
+    TASK_CHANGE_DETECTION: "change_detection",
     TASK_CROSS_MODAL_FUSION: "sar_anomaly",
     TASK_VQA_FOCUS: "infrastructure",
 }
@@ -171,12 +171,19 @@ def raster_mask_to_geojson(
     binary = np.asarray(mask, dtype=np.float32)
     if binary.ndim == 3:
         binary = binary[0]
-    binary = _resize_mask(binary, width, height)
+
+    mask_h, mask_w = binary.shape[-2], binary.shape[-1]
+    if (mask_h, mask_w) != (height, width) and mask_w > 0 and mask_h > 0:
+        # Dynamically scale affine transform before vectorizing to prevent triangular polygon spikes
+        adjusted_transform = affine * Affine.scale(width / mask_w, height / mask_h)
+    else:
+        adjusted_transform = affine
+
     labeled = (binary > 0.5).astype(np.uint8)
 
     raw = convert_raster_mask_to_geojson(
         labeled,
-        [affine.a, affine.b, affine.c, affine.d, affine.e, affine.f],
+        [adjusted_transform.a, adjusted_transform.b, adjusted_transform.c, adjusted_transform.d, adjusted_transform.e, adjusted_transform.f],
         src_crs,
         dissolve=dissolve,
     )
@@ -366,17 +373,21 @@ def standardize_feature_collection(
         confidences.append(conf)
         feat_id = feat.get("id") or props.get("id") or f"feat-{idx:03d}"
 
-        # Standardize class: 'infrastructure', 'flood', 'sar_anomaly', or 'water'
+        # Standardize class: 'infrastructure', 'flood', 'desiccation', 'sar_anomaly', or 'water'
         prop_class = props.get("class")
         if not prop_class:
             lbl = (props.get("label") or "").lower()
             cat = (props.get("category") or props.get("feature_type") or "").lower()
-            if task == "change_detection" or "flood" in lbl or "inundat" in lbl or "flood" in cat:
+            if "desiccat" in lbl or "desiccat" in cat or "retreat" in lbl or "drought" in lbl or "drought" in cat or "water_retreat" in lbl:
+                prop_class = "desiccation"
+            elif "flood" in lbl or "inundat" in lbl or "flood" in cat:
                 prop_class = "flood"
             elif task == "cross_modal" and (props.get("source") == "sar" or "sar" in lbl or "anomaly" in cat):
                 prop_class = "sar_anomaly"
             elif "water" in lbl or "water" in cat or "lake" in lbl or "river" in lbl:
                 prop_class = "water"
+            elif task == "change_detection":
+                prop_class = cat if cat in ("desiccation", "flood", "water_retreat", "change_detection") else "change_detection"
             else:
                 prop_class = "infrastructure"
 
@@ -462,12 +473,16 @@ def _instances_geoms_to_collection(
         if not inst_class:
             lbl = (inst.get("label") or default_label).lower()
             cat = (inst.get("category") or default_category or "").lower()
-            if task_type == "change_detection" or "flood" in lbl or "inundat" in lbl:
+            if "desiccat" in lbl or "desiccat" in cat or "retreat" in lbl or "drought" in lbl or "drought" in cat or "water_retreat" in lbl:
+                inst_class = "desiccation"
+            elif "flood" in lbl or "inundat" in lbl or "flood" in cat:
                 inst_class = "flood"
             elif task_type == "cross_modal" and (inst.get("source") == "sar" or "sar" in lbl or "anomaly" in cat):
                 inst_class = "sar_anomaly"
             elif "water" in lbl or "water" in cat or "lake" in lbl or "river" in lbl:
                 inst_class = "water"
+            elif task_type == "change_detection":
+                inst_class = cat if cat in ("desiccation", "flood", "water_retreat", "change_detection") else "change_detection"
             else:
                 inst_class = "infrastructure"
 

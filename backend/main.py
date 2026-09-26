@@ -10,8 +10,11 @@ from pathlib import Path
 
 import rasterio
 import torch
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("SatQueryBase")
@@ -25,13 +28,79 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# Origins explicitly including frontend on localhost:3000 and 127.0.0.1:3000
+origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+]
+
+env_cors = os.getenv("CORS_ORIGINS")
+if env_cors:
+    for o in env_cors.split(","):
+        cleaned = o.strip()
+        if cleaned and cleaned not in origins:
+            origins.append(cleaned)
+
+# CORSMiddleware added BEFORE router inclusions
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
+
+
+def _cors_headers_for_request(request: Request) -> dict[str, str]:
+    """Ensure error and exception responses retain valid CORS headers for browser requests."""
+    req_origin = request.headers.get("origin")
+    headers = {
+        "Access-Control-Allow-Credentials": "true",
+        "Access-Control-Allow-Methods": "*",
+        "Access-Control-Allow-Headers": "*",
+    }
+    if req_origin and (
+        req_origin in origins
+        or req_origin.startswith("http://localhost:")
+        or req_origin.startswith("http://127.0.0.1:")
+    ):
+        headers["Access-Control-Allow-Origin"] = req_origin
+    elif origins:
+        headers["Access-Control-Allow-Origin"] = origins[0]
+    return headers
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+        headers=_cors_headers_for_request(request),
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()},
+        headers=_cors_headers_for_request(request),
+    )
+
+
+@app.exception_handler(Exception)
+async def generic_exception_handler(request: Request, exc: Exception):
+    logger.error("Unhandled server exception: %s", exc, exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error", "error": str(exc)},
+        headers=_cors_headers_for_request(request),
+    )
 
 
 def _gdal_version() -> str:

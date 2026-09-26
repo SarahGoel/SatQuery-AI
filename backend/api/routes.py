@@ -20,7 +20,7 @@ except ImportError:
 from app.core.config import settings
 from app.database.session import get_optional_db
 from app.schemas.trace import AuditableTraceLogSchema
-from app.schemas.validation import QueryResponseEnvelope, TaskType
+from app.schemas.validation import QueryResponseEnvelope, TaskType, sanitize_for_json
 from app.services.agent import SatQueryController
 from app.utils.logger import get_logger
 from app.utils.report_generator import build_audit_summary, generate_audit_report
@@ -336,6 +336,9 @@ def _geometry_payload(
     if not bbox or len(bbox) < 4:
         bbox = [0.0, 0.0, 0.0, 0.0]
     geojson = controller.last_geojson
+    if geojson is None and trace.task in ["single_vqa", "single_image_vqa", "scene_vqa", "domain_knowledge_qa", "domain_qa"]:
+        return None, bbox, None
+
     if geojson is None and bbox is not None and len(bbox) >= 4:
         minx, miny, maxx, maxy = bbox[:4]
         geojson = {
@@ -510,6 +513,9 @@ async def query_pipeline(
 
         from starlette.concurrency import run_in_threadpool
 
+        # STRICT LIVE EXECUTION:
+        # Every request to /api/v1/query bypasses any pre-computed artifact report or cached trace
+        # in backend/artifacts/reports/. We instantiate a fresh SatQueryController and run live models.
         controller = SatQueryController(db=db)
         try:
             trace = await run_in_threadpool(
@@ -525,7 +531,7 @@ async def query_pipeline(
             raise HTTPException(status_code=503, detail=str(extra)) from extra
 
         geojson, bbox, change_mask = _geometry_payload(controller, trace)
-        trace_dict = trace.model_dump()
+        trace_dict = sanitize_for_json(trace.model_dump())
         audit_summary = build_audit_summary(
             trace,
             geojson=geojson,
@@ -533,18 +539,18 @@ async def query_pipeline(
         )
         remember_trace(
             trace.trace_id,
-            {
+            sanitize_for_json({
                 **trace_dict,
                 "geojson": geojson,
                 "change_overlay_uri": controller.last_overlay_uri,
                 "audit_summary": audit_summary,
-            },
+            }),
         )
         report_dir = settings.ARTIFACT_DIR / "reports"
         report_dir.mkdir(parents=True, exist_ok=True)
         json_body, _, json_name = generate_audit_report(
-            langgraph_state={"trace": trace_dict, "geojson": geojson},
-            geojson=geojson,
+            langgraph_state={"trace": sanitize_for_json(trace_dict), "geojson": sanitize_for_json(geojson)},
+            geojson=sanitize_for_json(geojson),
             change_overlay_uri=controller.last_overlay_uri,
             fmt="json",
         )
@@ -559,6 +565,10 @@ async def query_pipeline(
         input_meta = trace.input_metadata.model_dump()
         conf = float(trace.confidence if trace.confidence is not None else trace.confidence_score)
 
+        scratchpad = getattr(controller, "scratchpad", {}) or {}
+        task_classification = scratchpad.get("task_classification") if isinstance(scratchpad, dict) else None
+        water_delta = scratchpad.get("water_delta") if isinstance(scratchpad, dict) else None
+
         task_title_map = {
             "single_grounding": "Single-Image Feature Grounding",
             "single_image_grounding": "Single-Image Feature Grounding",
@@ -571,8 +581,105 @@ async def query_pipeline(
             "domain_knowledge_qa": "Earth Observation Domain Knowledge",
             "domain_qa": "Earth Observation Domain Knowledge",
         }
-        workflow_title = task_title_map.get(std_task, task_title_map.get(trace.task, f"{std_task.replace('_', ' ').title()} Analysis"))
-        clean_headline = f"{workflow_title} — {trace.trace_id}"
+        default_workflow_title = task_title_map.get(std_task, task_title_map.get(trace.task, f"{std_task.replace('_', ' ').title()} Analysis"))
+
+        # Dynamically classify detected task without hardcoded fallbacks
+        q_lower = query.lower()
+        scratch_ev = scratchpad.get("visual_evidence_type") if isinstance(scratchpad, dict) else None
+        if "retreat" in str(task_classification).lower() or "desiccat" in str(task_classification).lower():
+            detected_task = "Surface Water Desiccation Delineation"
+            visual_evidence_type = "Surface Water Desiccation Extent Mask"
+        elif task_classification:
+            detected_task = task_classification
+            visual_evidence_type = scratch_ev or f"{detected_task} Mask"
+        elif "bitemporal" in std_task or "change" in std_task:
+            if water_delta is not None and float(water_delta) < -0.005:
+                detected_task = "Surface Water Desiccation Delineation"
+                visual_evidence_type = "Surface Water Desiccation Extent Mask"
+            elif any(w in q_lower for w in ["retreat", "desiccat", "dry", "shrink", "reced", "drought"]):
+                detected_task = "Surface Water Desiccation Delineation"
+                visual_evidence_type = "Surface Water Desiccation Extent Mask"
+            elif water_delta is not None and float(water_delta) > 0.005:
+                detected_task = "Surface Water Inundation / Flood Expansion"
+                visual_evidence_type = "Surface Water Inundation Mask"
+            elif any(w in q_lower for w in ["flood", "inundat"]):
+                detected_task = "Surface Water Inundation / Flood"
+                visual_evidence_type = "Surface Water Inundation Mask"
+            elif any(w in q_lower for w in ["built-up", "urban", "construction"]):
+                detected_task = "Urban / Built-up Change Detection"
+                visual_evidence_type = "Built-up Alteration Mask"
+            else:
+                detected_task = default_workflow_title
+                visual_evidence_type = f"{detected_task} Mask"
+        elif "single_image_grounding" in std_task or "single_grounding" in std_task:
+            if any(w in q_lower for w in ["water", "lake", "river", "reservoir", "pond"]):
+                detected_task = "Water Body Surface Delineation"
+                visual_evidence_type = "Water Body Delineation Mask"
+            else:
+                detected_task = "Visual Grounding Delineation"
+                visual_evidence_type = "Visual Grounding Mask"
+        elif "cross_modal" in std_task or "cross_modal_joint_analysis" in std_task:
+            if any(w in q_lower for w in ["urban", "built-up", "building", "infrastructure"]):
+                detected_task = "Cross-Modal Urban Analysis"
+                visual_evidence_type = "SAR Backscatter Anomaly Mask"
+            else:
+                detected_task = "Cross-Modal Optical + SAR Analysis"
+                visual_evidence_type = "Fused Optical-SAR Classification Mask"
+        elif "single_vqa" in std_task or "single_image_vqa" in std_task:
+            if any(w in q_lower for w in ["land cover", "landcover", "land-cover", "terrain", "corine", "classify"]):
+                detected_task = "Land Cover Identification"
+                visual_evidence_type = "Land Cover Classification Mask"
+            elif any(w in q_lower for w in ["urban", "built-up", "building"]):
+                detected_task = "Urban Feature Identification"
+                visual_evidence_type = "Urban Feature Focus Mask"
+            else:
+                detected_task = "Single-Image Visual Question Answering"
+                visual_evidence_type = "Scene Classification Mask"
+        else:
+            detected_task = default_workflow_title
+            visual_evidence_type = scratch_ev or f"{detected_task} Mask"
+
+        workflow_title = detected_task
+        clean_headline = f"{detected_task} — {trace.trace_id}"
+
+        # Web-Ready raster previews and Base64 Data URI resolution
+        from app.services.geospatial.preview import ensure_data_uri, create_mask_overlay_data_uri, generate_raster_preview
+
+        t1_preview_url = getattr(controller, "t1_preview_url", None) or (scratchpad.get("t1_preview_url") if isinstance(scratchpad, dict) else None)
+        t2_preview_url = getattr(controller, "t2_preview_url", None) or (scratchpad.get("t2_preview_url") if isinstance(scratchpad, dict) else None)
+        leaflet_bounds = getattr(controller, "leaflet_bounds", None) or (scratchpad.get("leaflet_bounds") if isinstance(scratchpad, dict) else None)
+        if not t1_preview_url and len(filepaths) > 0:
+            try:
+                t1_preview_url, b1 = generate_raster_preview(filepaths[0])
+                if not leaflet_bounds:
+                    leaflet_bounds = b1
+                if len(filepaths) > 1:
+                    t2_preview_url, b2 = generate_raster_preview(filepaths[1])
+                    if not leaflet_bounds:
+                        leaflet_bounds = b2
+            except Exception as prev_err:
+                logger.debug("Raster preview generation in route skipped: %s", prev_err)
+
+        original_image = ensure_data_uri(t1_preview_url)
+        overlay_image = ensure_data_uri(controller.last_overlay_uri)
+        if not overlay_image:
+            c_mask = scratchpad.get("change_mask") if isinstance(scratchpad, dict) else None
+            if c_mask is not None:
+                try:
+                    c_arr = np.array(c_mask, dtype=np.uint8)
+                    t_cat = str(detected_task).lower()
+                    color = (249, 115, 22, 180) if ("retreat" in t_cat or "desiccat" in t_cat) else (239, 68, 68, 180)
+                    overlay_image = ensure_data_uri(create_mask_overlay_data_uri(c_arr, color=color))
+                except Exception:
+                    pass
+
+        # Guarantee valid data URI scheme prefix for raw base64 payloads
+        if original_image and not original_image.startswith("data:image"):
+            original_image = f"data:image/png;base64,{original_image}"
+        if overlay_image and not overlay_image.startswith("data:image"):
+            overlay_image = f"data:image/png;base64,{overlay_image}"
+
+        visual_evidence = overlay_image or original_image
 
         # Persist session log to dedicated query_history database table (PostGIS)
         if db is not None:
@@ -595,10 +702,10 @@ async def query_pipeline(
                     confidence=conf,
                     headline=clean_headline,
                     location=audit_summary.get("crs", "EPSG:4326"),
-                    analysis_data={
+                    analysis_data=sanitize_for_json({
                         "id": trace.trace_id,
                         "traceId": trace.trace_id,
-                        "detectedTask": workflow_title,
+                        "detectedTask": detected_task,
                         "selectedWorkflow": " + ".join(models_executed),
                         "confidence": int(conf * 100) if conf <= 1.0 else int(conf),
                         "headline": clean_headline,
@@ -606,42 +713,64 @@ async def query_pipeline(
                         "location": audit_summary.get("crs", "EPSG:4326"),
                         "geojson": geojson,
                         "bbox": bbox,
-                        "evidenceImage": controller.last_overlay_uri or "/satellite/grounding.jpg",
-                        "baseImage": "/satellite/water-optical.jpg",
+                        "evidenceType": visual_evidence_type,
+                        "evidenceImage": overlay_image or visual_evidence or "/satellite/grounding.jpg",
+                        "baseImage": original_image or t1_preview_url or "/satellite/water-optical.jpg",
+                        "original_image": original_image,
+                        "baseline_image": original_image,
+                        "base_image": original_image,
+                        "image_t0": original_image,
+                        "preview_url": original_image,
+                        "overlay_image": overlay_image,
+                        "change_overlay_uri": overlay_image,
                         "metrics": [
                             {"label": "Confidence", "value": f"{int(conf * 100) if conf <= 1.0 else int(conf)}%"},
-                            {"label": "Workflow", "value": workflow_title.split()[0] + " " + workflow_title.split()[-1]},
+                            {"label": "Workflow", "value": detected_task.split()[0] + " " + detected_task.split()[-1] if len(detected_task.split()) > 1 else detected_task},
                             {"label": "Features", "value": f"{features_count or 1} Polygons"},
                             {"label": "Trace ID", "value": trace.trace_id.replace("ISRO-SQ-", "")},
                         ],
-                    },
+                    }),
                     created_at=datetime.utcnow(),
                 )
                 db.merge(history_entry)
                 db.commit()
             except Exception as hist_err:
                 db.rollback()
-                logger.warning("Failed to persist query_history: %s", hist_err)
 
-        return QueryResponseEnvelope(
-            status="ok",
-            answer=trace.output,
-            task_type=std_task,
-            headline=clean_headline,
-            models_executed=models_executed,
-            input_metadata=input_meta,
-            confidence=conf,
-            geojson=geojson,
-            bbox=bbox,
-            change_mask=change_mask,
-            change_overlay_uri=controller.last_overlay_uri,
-            audit_summary=audit_summary,
-            trace=trace_dict,
-            report={
+        response_payload = {
+            "status": "ok",
+            "answer": trace.output,
+            "task_type": std_task,
+            "detected_task": detected_task,
+            "headline": clean_headline,
+            "models_executed": models_executed,
+            "input_metadata": input_meta,
+            "confidence": conf,
+            "geojson": geojson,
+            "bbox": bbox,
+            "change_mask": change_mask,
+            "change_overlay_uri": overlay_image,
+            "t1_preview_url": t1_preview_url,
+            "t2_preview_url": t2_preview_url,
+            "original_image": original_image,
+            "baseline_image": original_image,
+            "base_image": original_image,
+            "image_t0": original_image,
+            "preview_url": original_image,
+            "overlay_image": overlay_image,
+            "evidence_image": overlay_image,
+            "visual_evidence": visual_evidence,
+            "evidence_type": visual_evidence_type,
+            "leaflet_bounds": leaflet_bounds,
+            "audit_summary": audit_summary,
+            "trace": trace_dict,
+            "report": {
                 "json": f"/api/v1/reports/{trace.trace_id}?format=json",
                 "pdf": f"/api/v1/reports/{trace.trace_id}?format=pdf",
             },
-        )
+        }
+        sanitized_response = sanitize_for_json(response_payload)
+        return QueryResponseEnvelope(**sanitized_response)
     except HTTPException:
         raise
     except Exception as exc:

@@ -11,12 +11,22 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, TypedDict
 
+import numpy as np
 import rasterio
 from shapely.geometry import box
 from shapely.geometry.base import BaseGeometry
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+
+try:
+    from app.agents import router as router
+except ImportError:
+    from backend.app.agents import router as router
+import sys
+sys.modules["app.services.agent.router"] = router
+sys.modules["backend.app.services.agent.router"] = router
+
 from app.agents.router import (
     InputInspectorNode,
     STANDARDIZED_TASK_MAP,
@@ -142,6 +152,9 @@ class SatQueryController:
         self.last_bbox: list[float] | None = None
         self.last_state: dict[str, Any] | None = None
         self.last_alignment: Any | None = None
+        self.t1_preview_url: str | None = None
+        self.t2_preview_url: str | None = None
+        self.leaflet_bounds: list[list[float]] | None = None
         self.scratchpad: AgentScratchpad = AgentScratchpad()
         from app.agents.semantic_router import SemanticIntentRouter
 
@@ -171,14 +184,20 @@ class SatQueryController:
 
                 if src.count >= 4:
                     detected = ["Red", "Green", "Blue", "NIR"]
-                    sensor = "Cartosat-2S (Multispectral)"
                 elif src.count in [1, 2]:
-                    # SAR C-band polarizations (1–2 bands). Spec transcription used [1, 35].
                     detected = ["SAR-C-Band"]
-                    sensor = "Sentinel-1 / RISAT (SAR C-Band)"
                 else:
                     detected = ["RGB"]
-                    sensor = "Cartosat-2S (Optical RGB)"
+
+                sensor_tag = src.tags().get("SENSOR") or src.tags().get("PLATFORM")
+                if sensor_tag:
+                    sensor = sensor_tag
+                elif src.count >= 4:
+                    sensor = "Optical (Multispectral)"
+                elif src.count in [1, 2]:
+                    sensor = "SAR / Radar (C-Band)"
+                else:
+                    sensor = "Optical Imagery (True Color)"
 
                 res_val = abs(affine[0])
                 resolution = f"{res_val:.6f} deg/px" if "4326" in crs else f"{res_val:.2f} m/px"
@@ -212,7 +231,7 @@ class SatQueryController:
                     "modalities": list(modalities) if modalities else detected,
                     "width": w,
                     "height": h,
-                    "sensor": "Cartosat-2S (Optical RGB)",
+                    "sensor": "Optical Imagery (True Color)",
                     "resolution": "1.0m",
                     "band_count": cnt,
                 }
@@ -307,12 +326,42 @@ class SatQueryController:
         Executes metadata checks, dynamically plans the workflow, and records auditable logs [74, 76, 89].
         """
         paths = _coerce_filepaths(filepaths, kwargs)
+        self.last_geojson = None
+        self.last_overlay_uri = None
+        self.last_bbox = None
+        self.last_state = None
+        self.t1_preview_url = None
+        self.t2_preview_url = None
+        self.leaflet_bounds = None
+
+        if paths:
+            try:
+                from app.services.geospatial.preview import generate_raster_preview, ensure_data_uri
+                if len(paths) > 0:
+                    p1, b1 = generate_raster_preview(paths[0])
+                    self.t1_preview_url = ensure_data_uri(p1)
+                    self.leaflet_bounds = b1
+                if len(paths) > 1:
+                    p2, b2 = generate_raster_preview(paths[1])
+                    self.t2_preview_url = ensure_data_uri(p2)
+                    if not self.leaflet_bounds:
+                        self.leaflet_bounds = b2
+            except Exception as prev_err:
+                logger.debug("Failed pre-generating raster previews in execute_workflow: %s", prev_err)
+
         self.scratchpad = AgentScratchpad(
             query=query,
             filepaths=paths,
             force_task=kwargs.get("force_task"),
             use_mobilesam=bool(kwargs.get("use_mobilesam", True)),
         )
+        if self.t1_preview_url:
+            self.scratchpad["t1_preview_url"] = self.t1_preview_url
+        if self.t2_preview_url:
+            self.scratchpad["t2_preview_url"] = self.t2_preview_url
+        if self.leaflet_bounds:
+            self.scratchpad["leaflet_bounds"] = self.leaflet_bounds
+
         payload: FileWorkflowState = {
             "query": query,
             "filepaths": paths,
@@ -331,6 +380,9 @@ class SatQueryController:
         self.last_overlay_uri = None
         self.last_bbox = None
         self.last_state = None
+        self.t1_preview_url = None
+        self.t2_preview_url = None
+        self.leaflet_bounds = None
         query = state["query"]
         filepaths = list(state.get("filepaths") or [])
         trace_id = f"ISRO-SQ-2026-{uuid.uuid4().hex[:6].upper()}"
@@ -515,6 +567,25 @@ class SatQueryController:
 
         resolved_modalities = lead_modality + all_base_modalities
 
+        # Generate web-ready raster previews if available
+        if filepaths:
+            try:
+                from app.services.geospatial.preview import generate_raster_preview
+                if not self.t1_preview_url and len(filepaths) > 0:
+                    p1, b1 = generate_raster_preview(filepaths[0])
+                    self.t1_preview_url = p1
+                    self.leaflet_bounds = b1
+                if not self.t2_preview_url and len(filepaths) > 1:
+                    p2, b2 = generate_raster_preview(filepaths[1])
+                    self.t2_preview_url = p2
+                    if not self.leaflet_bounds:
+                        self.leaflet_bounds = b2
+                self.scratchpad["t1_preview_url"] = self.t1_preview_url
+                self.scratchpad["t2_preview_url"] = self.t2_preview_url
+                self.scratchpad["leaflet_bounds"] = self.leaflet_bounds
+            except Exception as prev_err:
+                logger.debug("Failed generating raster previews: %s", prev_err)
+
         intent_info = self.scratchpad.get("intent_classification")
         geo_metrics = self.scratchpad.get("geospatial_metrics")
 
@@ -528,7 +599,7 @@ class SatQueryController:
                 bounds=b[:4],
                 affine_transform=primary_meta.get("affine_transform", [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
                 modalities=resolved_modalities,
-                sensor=primary_meta.get("sensor", "Cartosat-2S / Sentinel-1"),
+                sensor=primary_meta.get("sensor", "Optical Imagery (True Color)"),
                 resolution=primary_meta.get("resolution", "1.0m"),
                 band_count=primary_meta.get("band_count", 3),
             ),
@@ -616,8 +687,86 @@ class SatQueryController:
 
         try:
             if task == "bi_temporal_change_analysis" and t2 is not None:
+                # LIVE EXECUTION: Route directly into TemporalChangeTool with PyTorch Siamese differencing & VLM
+                from app.services.analytical.temporal_change import TemporalChangeTool
+                import asyncio
+                import concurrent.futures
+
+                temp_tool = TemporalChangeTool()
+                tool_res = None
+                try:
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        loop = None
+
+                    if loop is not None and loop.is_running():
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                            tool_res = pool.submit(
+                                lambda: asyncio.run(temp_tool.execute(
+                                    scratchpad=self.scratchpad,
+                                    t1_path=str(optical),
+                                    t2_path=str(t2),
+                                    query=query,
+                                ))
+                            ).result()
+                    else:
+                        tool_res = asyncio.run(temp_tool.execute(
+                            scratchpad=self.scratchpad,
+                            t1_path=str(optical),
+                            t2_path=str(t2),
+                            query=query,
+                        ))
+                except Exception as tool_err:
+                    logger.warning("TemporalChangeTool execution fallback (%s); using TemporalChangeVQA", tool_err)
+                    tool_res = None
+
+                if tool_res is not None and tool_res.get("status") == "success":
+                    self.last_geojson = tool_res.get("geojson")
+                    self.t1_preview_url = tool_res.get("t1_preview_url") or tool_res.get("raster_preview") or self.t1_preview_url
+                    self.t2_preview_url = tool_res.get("t2_preview_url") or self.t2_preview_url
+                    self.leaflet_bounds = tool_res.get("leaflet_bounds") or tool_res.get("preview_bounds") or self.leaflet_bounds
+                    
+                    from app.services.geospatial.preview import ensure_data_uri, create_mask_overlay_data_uri
+                    overlay = tool_res.get("change_mask_uri") or tool_res.get("overlay_uri")
+                    if not overlay and tool_res.get("change_mask") is not None:
+                        try:
+                            c_mask = np.array(tool_res.get("change_mask"), dtype=np.uint8)
+                            t_cat = (tool_res.get("task_classification") or "").lower()
+                            color = (249, 115, 22, 180) if ("retreat" in t_cat or "desiccat" in t_cat) else (239, 68, 68, 180)
+                            overlay = create_mask_overlay_data_uri(c_mask, color=color)
+                        except Exception:
+                            pass
+                    self.last_overlay_uri = ensure_data_uri(overlay) or overlay
+                    final_answer = tool_res.get("answer", "")
+
+                    extra.append(RegistryExecutionSchema(model="SiameseChangeNet", params={"mode": "siamese_pytorch_tensor", "change_fraction": tool_res.get("change_fraction", 0.0)}))
+                    extra.append(RegistryExecutionSchema(model="CD-VQA-Pro", params={"epoch_difference": True}))
+                    extra.append(RegistryExecutionSchema(model="RemoteSensingVLMClient", params={"task_classification": tool_res.get("task_classification")}))
+
+                    if self.last_geojson:
+                        try:
+                            from app.tools.registry import default_tool_registry
+                            meas_res = default_tool_registry.execute_tool_sync(
+                                "GeodesicMeasurementTool",
+                                self.scratchpad,
+                                geojson=self.last_geojson,
+                            )
+                            extra.append(RegistryExecutionSchema(model="GeodesicMeasurementTool", params=meas_res.get("metrics", {})))
+                        except Exception as geo_err:
+                            logger.debug("Geodesic measurement notice: %s", geo_err)
+
+                    self.scratchpad.record_tool_execution(
+                        "TemporalChangeTool",
+                        {"t1": str(optical), "t2": str(t2), "query": query},
+                        0.25,
+                        f"Verdict={tool_res.get('directional_verdict')}, fraction={tool_res.get('change_fraction')}",
+                    )
+                    return final_answer, tool_res.get("confidence", 0.94), extra
+
                 changed = TemporalChangeVQA().analyze(t1_path=optical, t2_path=t2, query=query)
-                self.last_overlay_uri = changed.overlay_uri
+                from app.services.geospatial.preview import ensure_data_uri
+                self.last_overlay_uri = ensure_data_uri(changed.overlay_uri) or changed.overlay_uri
                 binary = (changed.change_mask > 0.5).astype("uint8")
 
                 q_lower = query.lower()
@@ -635,18 +784,31 @@ class SatQueryController:
                 )
                 is_flood_q = any(w in q_lower for w in ["flood", "flooded", "water", "inundat"])
 
-                if is_builtup_q:
+                t_class = changed.params.get("task_classification", "")
+                if "Retreat" in t_class or "Desiccation" in t_class or changed.params.get("category") == "desiccation":
+                    change_label = "Water Body Retreat / Exposed Landmass"
+                    change_category = "desiccation"
+                    change_class = "desiccation"
+                elif "Flood" in t_class or "Inundat" in t_class or changed.params.get("category") == "flood":
+                    change_label = "Detected Inundation / Flood"
+                    change_category = "flood"
+                    change_class = "flood"
+                elif "Urban" in t_class or "Built-up" in t_class or changed.params.get("category") == "urban_change":
                     change_label = "Detected Built-up Change"
                     change_category = "urban_change"
                     change_class = "infrastructure"
-                elif is_flood_q:
+                elif is_builtup_q:
+                    change_label = "Detected Built-up Change"
+                    change_category = "urban_change"
+                    change_class = "infrastructure"
+                elif is_flood_q and not any(w in q_lower for w in ["retreat", "desiccat", "dry", "shrink", "reced"]):
                     change_label = "Detected Inundation / Flood"
                     change_category = "flood"
                     change_class = "flood"
                 else:
-                    change_label = "Detected Surface Change"
-                    change_category = "change_detection"
-                    change_class = "change_detection"
+                    change_label = changed.params.get("label") or "Detected Surface Change"
+                    change_category = changed.params.get("category") or "change_detection"
+                    change_class = change_category
 
                 self.last_geojson = raster_mask_to_geojson(
                     optical,
@@ -722,6 +884,8 @@ class SatQueryController:
                             "change_bbox": changed.params.get("change_bbox"),
                             "quadrant": changed.params.get("quadrant"),
                             "is_directional": changed.params.get("is_directional", False),
+                            "task_classification": changed.params.get("task_classification"),
+                            "water_delta": changed.params.get("water_delta", 0.0),
                         },
                     )
                 return final_answer, changed.confidence, extra
@@ -729,31 +893,115 @@ class SatQueryController:
             if task == "single_image_grounding":
                 q_lower = query.lower()
                 is_water_q = any(w in q_lower for w in ["water", "river", "lake", "flood", "pond", "canal", "reservoir", "inundat"])
-                if is_water_q:
-                    try:
-                        from app.tools.registry import default_tool_registry
+                target_label = "Water Body" if is_water_q else "Target Feature"
+                target_category = "water" if is_water_q else "infrastructure"
+                target_class = "water" if is_water_q else "infrastructure"
 
-                        water_res = default_tool_registry.execute_tool_sync(
-                            "WaterGroundingTool",
-                            self.scratchpad,
-                            image_path=optical,
+                from app.services.geospatial.preview import create_mask_overlay_data_uri, ensure_data_uri
+                img_rgb = None
+                img_w = int(primary_meta.get("width") or 512)
+                img_h = int(primary_meta.get("height") or 512)
+                try:
+                    import rasterio
+                    with rasterio.open(optical) as src:
+                        img_w, img_h = src.width, src.height
+                        c = min(src.count, 3)
+                        if c >= 3:
+                            bands = src.read([1, 2, 3]).astype(np.float32)
+                            from app.services.geospatial.preview import _normalize_band_u8
+                            r = _normalize_band_u8(bands[0])
+                            g = _normalize_band_u8(bands[1])
+                            b = _normalize_band_u8(bands[2])
+                            img_rgb = np.stack([r, g, b], axis=-1)
+                        else:
+                            from app.services.geospatial.preview import _normalize_band_u8
+                            b1 = _normalize_band_u8(src.read(1).astype(np.float32))
+                            img_rgb = np.stack([b1, b1, b1], axis=-1)
+                except Exception:
+                    pass
+
+                if img_rgb is None:
+                    try:
+                        from PIL import Image
+                        pil_img = Image.open(optical).convert("RGB")
+                        img_w, img_h = pil_img.size
+                        img_rgb = np.array(pil_img, dtype=np.uint8)
+                    except Exception:
+                        img_rgb = np.zeros((img_h, img_w, 3), dtype=np.uint8)
+
+                vlm_answer = None
+                norm_box = None
+                try:
+                    from app.services.models.rs_vlm import RemoteSensingVLMClient
+                    rs_res = RemoteSensingVLMClient().generate_grounding(
+                        prompt=query,
+                        image_path=optical,
+                        extra_context={"task": task, "primary_meta": primary_meta},
+                    )
+                    if rs_res.text and not rs_res.text.startswith("[offline stub]"):
+                        vlm_answer = rs_res.text
+                    norm_box = rs_res.params.get("normalized_box")
+                    extra.append(RegistryExecutionSchema(model="RemoteSensingVLMClient", params=rs_res.params))
+                except Exception as rs_err:
+                    logger.debug("RemoteSensingVLMClient grounding error: %s", rs_err)
+
+                neural_mask = None
+                ground_conf = 0.92
+
+                # If Qwen2-VL returned normalized bounding box <box>[ymin, xmin, ymax, xmax]</box>
+                if norm_box and len(norm_box) == 4 and any(v > 0 for v in norm_box):
+                    try:
+                        ymin, xmin, ymax, xmax = norm_box
+                        box_px = [
+                            xmin * img_w / 1000.0,
+                            ymin * img_h / 1000.0,
+                            xmax * img_w / 1000.0,
+                            ymax * img_h / 1000.0,
+                        ]
+                        from app.services.grounding_service import GroundingService
+                        m_mask, m_geo = GroundingService.ground_box(
+                            image_hwc=img_rgb,
+                            box=box_px,
+                            geotiff_path=optical,
+                            label=target_label,
+                            category=target_category,
                         )
-                        if water_res.get("geojson") and water_res["geojson"].get("features"):
-                            self.last_geojson = water_res["geojson"]
-                        extra.append(
-                            RegistryExecutionSchema(
-                                model="WaterGroundingTool",
-                                params={"threshold": 0.05, "feature_count": water_res.get("feature_count", 0)},
+                        if m_geo and m_geo.get("features"):
+                            self.last_geojson = m_geo
+                            neural_mask = m_mask
+                            extra.append(RegistryExecutionSchema(model="MobileSAM", params={"box_prompt": box_px, "device": "cpu"}))
+                    except Exception as sam_err:
+                        logger.debug("MobileSAM ground_box notice: %s", sam_err)
+
+                if self.last_geojson is None:
+                    if is_water_q:
+                        try:
+                            from app.tools.registry import default_tool_registry
+
+                            water_res = default_tool_registry.execute_tool_sync(
+                                "WaterGroundingTool",
+                                self.scratchpad,
+                                image_path=optical,
                             )
-                        )
-                        self.scratchpad.record_tool_execution(
-                            "WaterGroundingTool",
-                            {"image_path": str(optical)},
-                            water_res.get("duration_seconds", 0.0),
-                            f"Identified {water_res.get('feature_count', 0)} water polygon(s)",
-                        )
-                    except Exception as wg_err:
-                        logger.debug("WaterGroundingTool fallback: %s", wg_err)
+                            if water_res.get("geojson") and water_res["geojson"].get("features"):
+                                self.last_geojson = water_res["geojson"]
+                            extra.append(
+                                RegistryExecutionSchema(
+                                    model="WaterGroundingTool",
+                                    params={"threshold": 0.05, "feature_count": water_res.get("feature_count", 0)},
+                                )
+                            )
+                            self.scratchpad.record_tool_execution(
+                                "WaterGroundingTool",
+                                {"image_path": str(optical)},
+                                water_res.get("duration_seconds", 0.0),
+                                f"Identified {water_res.get('feature_count', 0)} water polygon(s)",
+                            )
+                            w_mask = self.scratchpad.get("water_mask")
+                            if w_mask is not None:
+                                neural_mask = np.array(w_mask, dtype=np.uint8)
+                        except Exception as wg_err:
+                            logger.debug("WaterGroundingTool fallback: %s", wg_err)
 
                 if self.last_geojson is None:
                     grounded = TextGuidedGrounder().ground(
@@ -766,12 +1014,13 @@ class SatQueryController:
                             optical,
                             grounded.mask,
                             task_type="grounding",
-                            label="Detected Object",
-                            category="infrastructure",
+                            label=target_label,
+                            category=target_category,
                             confidence=grounded.confidence,
                         )
                     )
-                    self.last_geojson = standardize_feature_collection(self.last_geojson, task_type="grounding")
+                    neural_mask = grounded.mask
+                    ground_conf = grounded.confidence
                     extra.append(
                         RegistryExecutionSchema(
                             model="mobilesam" if use_mobilesam else "sam-vit-b",
@@ -784,11 +1033,45 @@ class SatQueryController:
                         0.1,
                         "Segmented discrete target features via MobileSAM/SAM",
                     )
-                    final_answer = grounded.description
-                    ground_conf = grounded.confidence
                 else:
-                    final_answer = f"Water body segmentation and surface delineation complete. Found {len(self.last_geojson.get('features', []))} water feature(s)."
                     ground_conf = 0.92
+
+                # Standardize feature properties
+                if self.last_geojson and "features" in self.last_geojson:
+                    for idx, feat in enumerate(self.last_geojson["features"]):
+                        feat.setdefault("properties", {})
+                        feat["properties"].update({
+                            "id": idx + 1,
+                            "label": feat["properties"].get("label") or target_label,
+                            "confidence": round(ground_conf, 2),
+                            "class": target_class,
+                            "category": target_category,
+                            "source": "grounding",
+                        })
+                    self.last_geojson = standardize_feature_collection(
+                        self.last_geojson,
+                        task_type="grounding",
+                        default_label=target_label,
+                        default_category=target_category,
+                    )
+
+                # Generate cyan mask overlay URI
+                overlay_color = (6, 182, 212, 180)  # Cyan overlay
+                if neural_mask is not None:
+                    self.last_overlay_uri = ensure_data_uri(create_mask_overlay_data_uri(neural_mask, color=overlay_color))
+                elif self.last_geojson and self.last_geojson.get("features"):
+                    try:
+                        import cv2
+                        m_arr = np.zeros((img_h, img_w), dtype=np.uint8)
+                        for f in self.last_geojson["features"]:
+                            pix = f.get("properties", {}).get("bbox_pixel")
+                            if pix and len(pix) == 4:
+                                px1, py1, px2, py2 = int(pix[0]), int(pix[1]), int(pix[2]), int(pix[3])
+                                m_arr[max(0, py1):min(img_h, py2), max(0, px1):min(img_w, px2)] = 1
+                        if m_arr.any():
+                            self.last_overlay_uri = ensure_data_uri(create_mask_overlay_data_uri(m_arr, color=overlay_color))
+                    except Exception:
+                        pass
 
                 # Geodesic area calculation
                 if self.last_geojson:
@@ -815,21 +1098,14 @@ class SatQueryController:
                     except Exception as geo_meas_err:
                         logger.debug("Geodesic measurement notice: %s", geo_meas_err)
 
-                # Route grounding description through RemoteSensingVLMClient
-                try:
-                    from app.services.models.rs_vlm import RemoteSensingVLMClient
+                task_classification = "Water Body Surface Delineation" if is_water_q else "Target Feature Delineation"
+                evidence_label = "Water Body Delineation Mask" if is_water_q else "Target Feature Extent Mask"
+                self.scratchpad["task_classification"] = task_classification
+                self.scratchpad["visual_evidence_type"] = evidence_label
 
-                    rs_res = RemoteSensingVLMClient().generate_grounding(
-                        prompt=query,
-                        image_path=optical,
-                        extra_context={"task": task, "primary_meta": primary_meta},
-                    )
-                    if rs_res.text and not rs_res.text.startswith("[offline stub]"):
-                        final_answer = rs_res.text
-                except Exception as rs_err:
-                    logger.debug("RemoteSensingVLMClient grounding notice: %s", rs_err)
-
-                if not final_answer or final_answer.startswith("[offline stub]"):
+                if vlm_answer and "You are an expert remote sensing" not in vlm_answer and "User Target Query:" not in vlm_answer and "User Question:" not in vlm_answer:
+                    final_answer = vlm_answer.strip()
+                else:
                     final_answer = generate_heuristic_summary(
                         query=query,
                         task=task,
@@ -905,6 +1181,31 @@ class SatQueryController:
                     "Extracted optical builtup and SAR water (threshold -18dB)",
                 )
 
+                q_lower = query.lower()
+                if any(w in q_lower for w in ["urban", "built-up", "building", "infrastructure"]):
+                    cm_task = "Cross-Modal Urban Analysis"
+                    cm_ev = "SAR Backscatter Anomaly Mask"
+                else:
+                    cm_task = "Cross-Modal Optical + SAR Analysis"
+                    cm_ev = "Fused Optical-SAR Classification Mask"
+                self.scratchpad["task_classification"] = cm_task
+                self.scratchpad["visual_evidence_type"] = cm_ev
+
+                from app.services.geospatial.preview import ensure_data_uri, create_mask_overlay_data_uri
+                if not self.last_overlay_uri and self.last_geojson and self.last_geojson.get("features"):
+                    try:
+                        cm_h, cm_w = int(primary_meta.get("height", 512)), int(primary_meta.get("width", 512))
+                        cm_mask = np.zeros((cm_h, cm_w), dtype=np.uint8)
+                        for feat in self.last_geojson.get("features", []):
+                            pix = feat.get("properties", {}).get("bbox_pixel")
+                            if pix and len(pix) == 4:
+                                px1, py1, px2, py2 = int(pix[0]), int(pix[1]), int(pix[2]), int(pix[3])
+                                cm_mask[max(0, py1):min(cm_h, py2), max(0, px1):min(cm_w, px2)] = 1
+                        if cm_mask.any():
+                            self.last_overlay_uri = ensure_data_uri(create_mask_overlay_data_uri(cm_mask, color=(249, 115, 22, 180)))
+                    except Exception:
+                        pass
+
                 final_answer = cm_result.answer
                 try:
                     from app.services.models.rs_vlm import RemoteSensingVLMClient
@@ -943,42 +1244,38 @@ class SatQueryController:
                 return final_answer, cm_result.confidence, extra
 
             if task == "single_image_vqa":
-                ben_classes: list[str] = []
-                try:
-                    from app.services.models.bigearthnet import BigEarthNetLandCoverClassifier
+                # Check if query explicitly asks for grounding / spatial localization
+                has_grounding_verbs = any(
+                    v in query.lower()
+                    for v in ["highlight", "locate", "find", "segment", "delineate", "outline", "bounding box", "draw a box"]
+                )
 
-                    ben_classifier = BigEarthNetLandCoverClassifier()
-                    ben_res = ben_classifier.classify(optical_path=optical)
-                    ben_classes = ben_res.predicted_classes
-                    extra.append(
-                        RegistryExecutionSchema(
-                            model="bigearthnet-encoder",
-                            params=ben_res.params,
+                if has_grounding_verbs:
+                    try:
+                        grounded = TextGuidedGrounder().ground(
+                            image_path=optical, prompt=query, use_mobilesam=use_mobilesam
                         )
-                    )
-                except Exception as ben_err:
-                    logger.debug("bigearthnet_classification_skipped: %s", ben_err)
+                        if grounded.geojson and grounded.geojson.get("features"):
+                            self.last_geojson = standardize_feature_collection(grounded.geojson, task_type="vqa_focus")
+                    except Exception as g_err:
+                        logger.debug("vqa_grounding_salience_failed: %s", g_err)
+                else:
+                    # General description queries: bypass forced bounding boxes / polygon overlays
+                    self.last_geojson = None
+                    self.last_overlay_uri = None
 
-                # Isolate visual AOI focus geometry without overriding task_type to grounding
-                try:
-                    grounded = TextGuidedGrounder().ground(
-                        image_path=optical, prompt=query, use_mobilesam=use_mobilesam
-                    )
-                    if grounded.geojson and grounded.geojson.get("features"):
-                        self.last_geojson = standardize_feature_collection(grounded.geojson, task_type="vqa_focus")
-                    else:
-                        self.last_geojson = scene_focus_geojson(
-                            optical,
-                            label=query[:40] if query else "Scene focus",
-                            confidence=0.88,
-                        )
-                except Exception as g_err:
-                    logger.debug("vqa_grounding_salience_failed: %s", g_err)
-                    self.last_geojson = scene_focus_geojson(
-                        optical,
-                        label=query[:40] if query else "Scene focus",
-                        confidence=0.88,
-                    )
+                q_lower = query.lower()
+                if any(w in q_lower for w in ["land cover", "landcover", "land-cover", "terrain", "corine", "classify"]):
+                    vqa_task = "Land Cover Identification"
+                    vqa_ev = "Land Cover Classification"
+                elif any(w in q_lower for w in ["urban", "built-up", "building"]):
+                    vqa_task = "Urban Feature Identification"
+                    vqa_ev = "Urban Feature Identification"
+                else:
+                    vqa_task = "Single-Image Visual Question Answering"
+                    vqa_ev = "Scene Description"
+                self.scratchpad["task_classification"] = vqa_task
+                self.scratchpad["visual_evidence_type"] = vqa_ev
 
                 if self.last_geojson:
                     try:
@@ -1016,10 +1313,10 @@ class SatQueryController:
                             "task_type": "single_vqa",
                             "geojson": self.last_geojson,
                             "metadata": primary_meta,
-                            "land_cover_classes": ben_classes,
                         },
                     )
-                except Exception:
+                except Exception as vlm_err:
+                    logger.error("RemoteSensingVLMClient inference failed (%s); trying fallback VLM client", vlm_err, exc_info=True)
                     from app.services.models.base import LocalVisionLanguageClient
 
                     vlm = LocalVisionLanguageClient().generate(
@@ -1030,10 +1327,10 @@ class SatQueryController:
                             "task_type": "single_vqa",
                             "geojson": self.last_geojson,
                             "metadata": primary_meta,
-                            "land_cover_classes": ben_classes,
                         },
                     )
 
+                clean_answer = vlm.text.strip() if vlm.text else ""
                 extra.append(RegistryExecutionSchema(model=vlm.params.get("model", "GeoChat-RS"), params=vlm.params))
                 self.scratchpad.record_tool_execution(
                     "RemoteSensingVLMClient",
@@ -1041,10 +1338,11 @@ class SatQueryController:
                     0.2,
                     f"Generated VQA domain analysis with confidence {vlm.confidence}",
                 )
-                return vlm.text, vlm.confidence, extra
+                return clean_answer, vlm.confidence, extra
 
         except Exception as exc:  # noqa: BLE001
-            logger.warning("specialist_dispatch_failed: %s", exc)
+            logger.error("specialist_dispatch_failed: %s", exc, exc_info=True)
+            raise
         return None, None, extra
 
     def _bounds_polygon(self, meta: InputMetadataSchema) -> BaseGeometry:
@@ -1266,6 +1564,7 @@ def compile_satquery_graph(controller: SatQueryController):
         if visual_output and not visual_output.startswith("[offline stub]"):
             final_text = visual_output
         else:
+            extra_c = {"mode": "expert_temporal_narrative"} if task in ("bi_temporal_change_analysis", "bitemporal_change") else None
             final_text = generate_heuristic_summary(
                 query=query,
                 task=task,
@@ -1273,6 +1572,7 @@ def compile_satquery_graph(controller: SatQueryController):
                 metadata=parsed_meta,
                 confidence=float(state.get("confidence") or 0.88),
                 models=models or ["RS-Grounding-V3"],
+                extra_context=extra_c,
             )
 
         return {**state, "text_output": final_text}
@@ -1333,7 +1633,7 @@ def compile_satquery_graph(controller: SatQueryController):
                 bounds=calculated_bounds,
                 affine_transform=primary_meta.get("affine_transform", [1.0, 0.0, 0.0, 0.0, -1.0, 0.0]),
                 modalities=modalities,
-                sensor=primary_meta.get("sensor", "Cartosat-2S / Sentinel-1"),
+                sensor=primary_meta.get("sensor", "Optical Imagery (True Color)"),
                 resolution=primary_meta.get("resolution", "1.0m"),
                 band_count=primary_meta.get("band_count", 3),
             )

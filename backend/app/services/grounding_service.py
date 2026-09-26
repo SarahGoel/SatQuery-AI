@@ -292,7 +292,7 @@ class GroundingService:
                                 "label": f"Grounded Object {idx:02d}",
                                 "class": "infrastructure",
                                 "category": "infrastructure",
-                                "mask": mask,
+                                "mask": mask.tolist() if isinstance(mask, np.ndarray) else mask,
                             }
                         )
                     if neural_candidates:
