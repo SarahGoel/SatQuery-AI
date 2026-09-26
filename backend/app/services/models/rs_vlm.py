@@ -78,6 +78,20 @@ class RemoteSensingVLMClient:
         lora_target = os.environ.get("BIGEARTHNET_LORA_PATH")
         self.load_lora_adapter(lora_target)
 
+        # Fine-tuned Qwen2-VL LoRA adapter state (/local_models/vlm_lora/)
+        self.vlm_lora_path: Optional[Path] = self._resolve_vlm_lora_path(os.environ.get("VLM_LORA_PATH"))
+        self.vlm_lora_detected: bool = self._has_vlm_lora_weights(self.vlm_lora_path)
+        self.vlm_lora_loaded: bool = False
+        self.vlm_lora_adapter_name: Optional[str] = (
+            self.vlm_lora_path.name if (self.vlm_lora_path and self.vlm_lora_detected) else None
+        )
+        self.vlm_model: Any = None
+        self.vlm_processor: Any = None
+        self.base_model_name: str = "Qwen/Qwen2-VL-2B-Instruct"
+
+        if self.vlm_lora_detected:
+            self.load_vlm_lora_adapter(self.vlm_lora_path)
+
     DEFAULT_LORA_CANDIDATES = [
         "local_models/bigearthnet",
         "local_models/bigearthnet/adapter_model.bin",
@@ -158,14 +172,185 @@ class RemoteSensingVLMClient:
             self.lora_loaded = False
             return False
 
-    def generate(
+    DEFAULT_VLM_LORA_CANDIDATES = [
+        "/local_models/vlm_lora",
+        "backend/local_models/vlm_lora",
+        "local_models/vlm_lora",
+    ]
+
+    def _resolve_vlm_lora_path(self, override_path: Optional[str | Path] = None) -> Optional[Path]:
+        """Resolves path to fine-tuned Qwen2-VL LoRA adapter directory."""
+        if override_path:
+            p = Path(override_path)
+            if p.exists():
+                return p.resolve()
+
+        env_path = os.environ.get("VLM_LORA_PATH")
+        if env_path:
+            p = Path(env_path)
+            if p.exists():
+                return p.resolve()
+
+        backend_dir = Path(__file__).resolve().parents[3]
+        repo_root = backend_dir.parent
+
+        candidates = [
+            Path("/local_models/vlm_lora"),
+            backend_dir / "local_models" / "vlm_lora",
+            repo_root / "backend" / "local_models" / "vlm_lora",
+            repo_root / "local_models" / "vlm_lora",
+            Path(settings.LOCAL_MODELS_DIR) / "vlm_lora",
+            Path("backend/local_models/vlm_lora"),
+            Path("local_models/vlm_lora"),
+        ]
+
+        # Prioritize path containing adapter weights
+        for cand in candidates:
+            if cand.exists() and self._has_vlm_lora_weights(cand):
+                return cand.resolve()
+
+        for cand in candidates:
+            if cand.exists():
+                return cand.resolve()
+
+        return (backend_dir / "local_models" / "vlm_lora").resolve()
+
+    def _has_vlm_lora_weights(self, path: Optional[Path]) -> bool:
+        """Verifies presence of adapter_model.safetensors and adapter_config.json."""
+        if not path or not path.exists():
+            return False
+        return (path / "adapter_model.safetensors").exists() and (path / "adapter_config.json").exists()
+
+    def load_vlm_lora_adapter(self, adapter_path: Optional[str | Path] = None) -> bool:
+        """Dynamically loads the fine-tuned Qwen2-VL LoRA adapter using PEFT on CPU (torch.float32).
+
+        Configures model loading to attach the LoRA adapter onto Qwen/Qwen2-VL-2B-Instruct,
+        or configures the local endpoint to point directly to these weights.
+        Preserves graceful heuristic fallback if packages are missing or loading fails.
+        """
+        target_path = Path(adapter_path).resolve() if adapter_path else self.vlm_lora_path
+        if not target_path or not self._has_vlm_lora_weights(target_path):
+            logger.warning(
+                "VLM LoRA adapter files not found at '%s'. Falling back to base VLM.",
+                target_path or "local_models/vlm_lora",
+            )
+            self.vlm_lora_loaded = False
+            return False
+
+        self.vlm_lora_path = target_path
+        self.vlm_lora_detected = True
+        self.vlm_lora_adapter_name = target_path.name or "vlm_lora"
+
+        # Point local serving client model to adapter weights
+        if hasattr(self, "client") and self.client is not None:
+            self.client.model = str(target_path)
+
+        try:
+            import torch
+            from peft import PeftModel
+            from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
+
+            logger.info("Loading base model %s on CPU (torch.float32)...", self.base_model_name)
+            base_model = Qwen2VLForConditionalGeneration.from_pretrained(
+                self.base_model_name,
+                torch_dtype=torch.float32,
+                device_map="cpu",
+                low_cpu_mem_usage=True,
+            )
+            self.vlm_model = PeftModel.from_pretrained(
+                base_model,
+                str(target_path),
+                torch_dtype=torch.float32,
+            )
+            self.vlm_processor = AutoProcessor.from_pretrained(str(target_path))
+            self.vlm_lora_loaded = True
+            logger.info("Successfully loaded fine-tuned Qwen2-VL LoRA adapter from '%s'", target_path)
+            return True
+        except Exception as exc:
+            logger.warning(
+                "Neural VLM adapter dynamic loading deferred or unavailable (%s). "
+                "Configured local serving endpoint to point directly to adapter weights.",
+                exc,
+            )
+            self.vlm_lora_loaded = False
+            return False
+
+    def generate_response(
         self,
         prompt: str,
         image_path: Path | str | None = None,
         images: list[Path | str | bytes] | None = None,
         extra_context: dict[str, Any] | None = None,
     ) -> VLMResult:
-        """Route generation through domain-adapted remote sensing system prompt."""
+        """Runs neural inference using fine-tuned Qwen2-VL LoRA adapter or graceful fallback."""
+        ctx = dict(extra_context or {})
+        ctx.setdefault("system_prompt", self.system_prompt)
+        ctx.setdefault("rs_specialist", "GeoChat-RS")
+
+        # 1. Neural forward pass if PeftModel is loaded in memory
+        if self.vlm_lora_loaded and self.vlm_model is not None and self.vlm_processor is not None:
+            try:
+                from PIL import Image
+
+                primary_img = None
+                if image_path and Path(image_path).exists():
+                    primary_img = Image.open(image_path).convert("RGB")
+                elif images and isinstance(images[0], (str, Path)) and Path(images[0]).exists():
+                    primary_img = Image.open(images[0]).convert("RGB")
+
+                content = []
+                if primary_img is not None:
+                    content.append({"type": "image", "image": primary_img})
+                content.append({"type": "text", "text": prompt})
+
+                messages = [
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": content},
+                ]
+
+                text_prompt = self.vlm_processor.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+                inputs = self.vlm_processor(
+                    text=[text_prompt],
+                    images=[primary_img] if primary_img else None,
+                    padding=True,
+                    return_tensors="pt",
+                )
+
+                generated_ids = self.vlm_model.generate(**inputs, max_new_tokens=256)
+                generated_ids_trimmed = [
+                    out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+                ]
+                output_text = self.vlm_processor.batch_decode(
+                    generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+                )[0]
+
+                return VLMResult(
+                    text=output_text,
+                    confidence=0.95,
+                    params={
+                        "backend": "neural_peft_cpu",
+                        "model": self.base_model_name,
+                        "lora_adapter": self.vlm_lora_adapter_name,
+                        "lora_loaded": True,
+                        "domain_adapter": "GeoChat-RS",
+                    },
+                )
+            except Exception as exc:
+                logger.warning("Neural forward pass failed (%s); falling back to local serving endpoint", exc)
+
+        # 2. Local serving endpoint / graceful fallback
+        return self._generate_via_client(prompt, image_path, images, ctx)
+
+    def _generate_via_client(
+        self,
+        prompt: str,
+        image_path: Path | str | None = None,
+        images: list[Path | str | bytes] | None = None,
+        extra_context: dict[str, Any] | None = None,
+    ) -> VLMResult:
+        """Route generation through domain-adapted remote sensing system prompt via client."""
         ctx = dict(extra_context or {})
         ctx.setdefault("system_prompt", self.system_prompt)
         ctx.setdefault("rs_specialist", "GeoChat-RS")
@@ -181,6 +366,8 @@ class RemoteSensingVLMClient:
             res.params["domain_adapter"] = "GeoChat-RS"
             res.params["lora_loaded"] = self.lora_loaded
             res.params["lora_adapter"] = self.lora_adapter_name if self.lora_loaded else None
+            res.params["vlm_lora_detected"] = self.vlm_lora_detected
+            res.params["vlm_lora_loaded"] = self.vlm_lora_loaded
             return res
         except Exception as exc:
             logger.warning("RemoteSensingVLMClient inference error (%s); applying heuristic summary", exc)
@@ -200,8 +387,25 @@ class RemoteSensingVLMClient:
                     "model": self.model,
                     "lora_loaded": self.lora_loaded,
                     "lora_adapter": self.lora_adapter_name if self.lora_loaded else None,
+                    "vlm_lora_detected": self.vlm_lora_detected,
+                    "vlm_lora_loaded": self.vlm_lora_loaded,
                 },
             )
+
+    def generate(
+        self,
+        prompt: str,
+        image_path: Path | str | None = None,
+        images: list[Path | str | bytes] | None = None,
+        extra_context: dict[str, Any] | None = None,
+    ) -> VLMResult:
+        """Route generation through domain-adapted remote sensing system prompt."""
+        return self.generate_response(
+            prompt=prompt,
+            image_path=image_path,
+            images=images,
+            extra_context=extra_context,
+        )
 
     def generate_vqa(
         self,
@@ -214,7 +418,7 @@ class RemoteSensingVLMClient:
         ctx = dict(extra_context or {})
         ctx["task"] = "single_vqa"
         ctx["task_type"] = "single_vqa"
-        return self.generate(
+        return self.generate_response(
             prompt=prompt,
             image_path=image_path,
             images=images,
@@ -248,7 +452,10 @@ class RemoteSensingVLMClient:
             if bbox_res.get("geojson"):
                 res.params["geojson"] = bbox_res.get("geojson")
             res.params["grounding_method"] = bbox_res.get("method")
+            if bbox_res.get("cleaned_text"):
+                res.text = bbox_res["cleaned_text"]
         except Exception as exc:
             logger.debug("Bounding box extraction skipped or failed: %s", exc)
         return res
+
 

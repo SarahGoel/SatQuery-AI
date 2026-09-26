@@ -1,0 +1,90 @@
+[
+  {
+    "image": "images/vrs_001.tif",
+    "question": "Locate the primary aircraft runway on the tarmac.",
+    "answer": "The primary aircraft runway is positioned along the central corridor.",
+    "bbox": [
+      32.0,
+      112.0,
+      224.0,
+      144.0
+    ]
+  },
+  {
+    "image": "images/vrs_002.tif",
+    "question": "Detect the commercial industrial warehouse rooftops.",
+    "answer": "Commercial warehouse rooftops are arranged in the northern quadrant.",
+    "bbox": [
+      24.0,
+      24.0,
+      120.0,
+      120.0
+    ]
+  },
+  {
+    "image": "images/vrs_003.tif",
+    "question": "Highlight the municipal water reservoir basin.",
+    "answer": "The municipal water reservoir basin is clearly visible in the central-western sector.",
+    "bbox": [
+      32.0,
+      64.0,
+      160.0,
+      192.0
+    ]
+  },
+  {
+    "image": "images/vrs_004.tif",
+    "question": "Identify the multi-track railway transport interchange.",
+    "answer": "The multi-track railway transport interchange crosses the southern portion.",
+    "bbox": [
+      40.0,
+      160.0,
+      216.0,
+      220.0
+    ]
+  },
+  {
+    "image": "images/vrs_005.tif",
+    "question": "Delineate the dense agricultural crop parcel.",
+    "answer": "The dense agricultural crop parcel occupies the southeastern sector.",
+    "bbox": [
+      128.0,
+      128.0,
+      240.0,
+      240.0
+    ]
+  },
+  {
+    "image": "images/vrs_006.tif",
+    "question": "Locate the rectangular residential housing block.",
+    "answer": "The residential housing block is clustered in the western sector.",
+    "bbox": [
+      20.0,
+      40.0,
+      100.0,
+      180.0
+    ]
+  },
+  {
+    "image": "images/vrs_007.tif",
+    "question": "Detect the drainage detention canal bordering the road.",
+    "answer": "The drainage canal extends adjacent to the primary thoroughfare.",
+    "bbox": [
+      60.0,
+      70.0,
+      150.0,
+      160.0
+    ]
+  },
+  {
+    "image": "images/vrs_008.tif",
+    "question": "Highlight the electrical substation transformer yard.",
+    "answer": "The electrical transformer yard is bounded by high security perimeter fencing.",
+    "bbox": [
+      80.0,
+      80.0,
+      180.0,
+      180.0
+    ]
+  }
+]
