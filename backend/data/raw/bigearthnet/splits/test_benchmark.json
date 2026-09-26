@@ -1,0 +1,66 @@
+[
+  {
+    "image_opt": "sentinel2/ben_001_opt.tif",
+    "image_sar": "sentinel1/ben_001_sar.tif",
+    "labels": [
+      "Urban fabric",
+      "Industrial or commercial units"
+    ]
+  },
+  {
+    "image_opt": "sentinel2/ben_002_opt.tif",
+    "image_sar": "sentinel1/ben_002_sar.tif",
+    "labels": [
+      "Inland waters",
+      "Inland wetlands"
+    ]
+  },
+  {
+    "image_opt": "sentinel2/ben_003_opt.tif",
+    "image_sar": "sentinel1/ben_003_sar.tif",
+    "labels": [
+      "Broad-leaved forest",
+      "Mixed forest"
+    ]
+  },
+  {
+    "image_opt": "sentinel2/ben_004_opt.tif",
+    "image_sar": "sentinel1/ben_004_sar.tif",
+    "labels": [
+      "Arable land",
+      "Complex cultivation patterns"
+    ]
+  },
+  {
+    "image_opt": "sentinel2/ben_005_opt.tif",
+    "image_sar": "sentinel1/ben_005_sar.tif",
+    "labels": [
+      "Pastures",
+      "Natural grassland and sparsely vegetated areas"
+    ]
+  },
+  {
+    "image_opt": "sentinel2/ben_006_opt.tif",
+    "image_sar": "sentinel1/ben_006_sar.tif",
+    "labels": [
+      "Urban fabric",
+      "Complex cultivation patterns"
+    ]
+  },
+  {
+    "image_opt": "sentinel2/ben_007_opt.tif",
+    "image_sar": "sentinel1/ben_007_sar.tif",
+    "labels": [
+      "Coniferous forest",
+      "Transitional woodland/shrub"
+    ]
+  },
+  {
+    "image_opt": "sentinel2/ben_008_opt.tif",
+    "image_sar": "sentinel1/ben_008_sar.tif",
+    "labels": [
+      "Inland waters",
+      "Urban fabric"
+    ]
+  }
+]

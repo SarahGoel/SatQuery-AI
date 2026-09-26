@@ -1,0 +1,58 @@
+[
+  {
+    "image_t1": "t1/cdvqa_001_t1.tif",
+    "image_t2": "t2/cdvqa_001_t2.tif",
+    "question": "What land cover changes occurred between the initial and follow-up observation dates?",
+    "answer": "Residential building infrastructure has [INCREASED] across the cleared agricultural sector.",
+    "mask": "masks/cdvqa_001_mask.tif"
+  },
+  {
+    "image_t1": "t1/cdvqa_002_t1.tif",
+    "image_t2": "t2/cdvqa_002_t2.tif",
+    "question": "Did the reservoir surface water extent expand or contract between observation passes?",
+    "answer": "Water surface area has [DECREASED] due to seasonal evaporation.",
+    "mask": "masks/cdvqa_002_mask.tif"
+  },
+  {
+    "image_t1": "t1/cdvqa_003_t1.tif",
+    "image_t2": "t2/cdvqa_003_t2.tif",
+    "question": "What change is observable in the dense forest tract between observation years?",
+    "answer": "Forest canopy density has [DECREASED] following logging activities.",
+    "mask": "masks/cdvqa_003_mask.tif"
+  },
+  {
+    "image_t1": "t1/cdvqa_004_t1.tif",
+    "image_t2": "t2/cdvqa_004_t2.tif",
+    "question": "How did industrial warehouse expansion develop over the monitoring interval?",
+    "answer": "Industrial logistics facilities have [INCREASED] in the eastern corridor.",
+    "mask": "masks/cdvqa_004_mask.tif"
+  },
+  {
+    "image_t1": "t1/cdvqa_005_t1.tif",
+    "image_t2": "t2/cdvqa_005_t2.tif",
+    "question": "Did the coastal shoreline or dock structures alter over the bitemporal period?",
+    "answer": "The shoreline and docking installations [REMAINED UNCHANGED] during this period.",
+    "mask": "masks/cdvqa_005_mask.tif"
+  },
+  {
+    "image_t1": "t1/cdvqa_006_t1.tif",
+    "image_t2": "t2/cdvqa_006_t2.tif",
+    "question": "What is the status of the urban highway development across the two passes?",
+    "answer": "Paved road network length has [INCREASED] through the newly leveled terrain.",
+    "mask": "masks/cdvqa_006_mask.tif"
+  },
+  {
+    "image_t1": "t1/cdvqa_007_t1.tif",
+    "image_t2": "t2/cdvqa_007_t2.tif",
+    "question": "Have vegetation indices changed in the agricultural parcels between T1 and T2?",
+    "answer": "Crop cultivation and green canopy coverage has [INCREASED] post-monsoon.",
+    "mask": "masks/cdvqa_007_mask.tif"
+  },
+  {
+    "image_t1": "t1/cdvqa_008_t1.tif",
+    "image_t2": "t2/cdvqa_008_t2.tif",
+    "question": "Did river floodplain inundation increase or recede between the sensor acquisitions?",
+    "answer": "Flood inundation extent has [DECREASED] as waters receded back to main channel.",
+    "mask": "masks/cdvqa_008_mask.tif"
+  }
+]

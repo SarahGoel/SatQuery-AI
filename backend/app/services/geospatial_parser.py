@@ -88,6 +88,74 @@ def parse_geochat_bbox(text: str) -> Optional[List[float]]:
     return [ymin, xmin, ymax, xmax]
 
 
+def extract_vlm_spatial_tokens(
+    raw_text: str,
+    img_width: int,
+    img_height: int,
+) -> Tuple[str, List[List[float]]]:
+    """Extracts Qwen2-VL / GeoChat spatial coordinate tokens, normalizes to pixel space, and strips tags.
+
+    Matches:
+    - <box>[ymin, xmin, ymax, xmax]</box> (Qwen2-VL native)
+    - [ymin, xmin, ymax, xmax] (standard bracketed coordinates)
+
+    Normalizes coordinates from the [0, 1000] range to pixel space:
+        xmin = (x1 / 1000) * W,  ymin = (y1 / 1000) * H
+        xmax = (x2 / 1000) * W,  ymax = (y2 / 1000) * H
+
+    Returns:
+        tuple[str, list[list[float]]]: (cleaned_text, list of [xmin, ymin, xmax, ymax] pixel boxes)
+    """
+    if not raw_text:
+        return "", []
+
+    box_pattern = re.compile(
+        r"<box>\s*\[?\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\]?\s*</box>",
+        re.IGNORECASE,
+    )
+    bracket_pattern = re.compile(
+        r"\[\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\]"
+    )
+
+    matches = box_pattern.findall(raw_text)
+    if not matches:
+        matches = bracket_pattern.findall(raw_text)
+
+    boxes: List[List[float]] = []
+    w = float(max(1, img_width))
+    h = float(max(1, img_height))
+
+    for m in matches:
+        # Format: [ymin, xmin, ymax, xmax] -> m[0]=y1, m[1]=x1, m[2]=y2, m[3]=x2
+        y1, x1, y2, x2 = float(m[0]), float(m[1]), float(m[2]), float(m[3])
+
+        # Normalize coordinates from [0, 1000] range (or [0, 1] range) to pixel space
+        max_coord = max(y1, x1, y2, x2)
+        if max_coord <= 1.0:
+            scale_x, scale_y = w, h
+        else:
+            scale_x, scale_y = w / 1000.0, h / 1000.0
+
+        x_lo, x_hi = min(x1, x2), max(x1, x2)
+        y_lo, y_hi = min(y1, y2), max(y1, y2)
+
+        xmin = round(x_lo * scale_x, 2)
+        ymin = round(y_lo * scale_y, 2)
+        xmax = round(x_hi * scale_x, 2)
+        ymax = round(y_hi * scale_y, 2)
+
+        boxes.append([xmin, ymin, xmax, ymax])
+
+    # Strip the raw <box>...</box> tags so the analyst receives clean natural language prose
+    cleaned = box_pattern.sub("", raw_text)
+    cleaned = re.sub(r"</?box>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r"\s+([.,;:!?])", r"\1", cleaned).strip()
+
+    return cleaned, boxes
+
+
+
 
 def _reproject_to_wgs84(
     xs: List[float],
@@ -136,7 +204,13 @@ def extract_and_transform_bbox(
         or file reading fails, catch the exception, log an auditable warning,
         and generate a synthetic GeoJSON Polygon centered on ISRO SAC coordinates (Ahmedabad).
     """
+    cleaned_text, spatial_boxes = extract_vlm_spatial_tokens(model_text_output, 1000, 1000)
     raw_bbox = parse_geochat_bbox(model_text_output)
+    if raw_bbox is None and spatial_boxes:
+        # Derive [ymin, xmin, ymax, xmax] from spatial token [xmin, ymin, xmax, ymax]
+        box0 = spatial_boxes[0]
+        raw_bbox = [box0[1], box0[0], box0[3], box0[2]]
+
     if raw_bbox is None:
         logger.info("No coordinates detected in model output; applying synthetic ISRO SAC fallback")
         half_span = ISRO_SAC_SPAN_DEG / 2.0
@@ -177,6 +251,8 @@ def extract_and_transform_bbox(
             "bbox": None,
             "bbox_wgs84": bbox_wgs84,
             "pixel_bbox": None,
+            "cleaned_text": cleaned_text,
+            "spatial_tokens": spatial_boxes,
             "geojson": {
                 "type": "FeatureCollection",
                 "features": [feature],
@@ -195,6 +271,7 @@ def extract_and_transform_bbox(
             w, h = src.width, src.height
             transform = src.transform
             crs = src.crs.to_string() if src.crs else None
+            cleaned_text, spatial_boxes = extract_vlm_spatial_tokens(model_text_output, w, h)
 
             # Verify CRS and affine transform validity (must not be empty or degenerate identity)
             if not crs or transform == Affine.identity() or abs(transform.a) < 1e-9 or abs(transform.e) < 1e-9:
@@ -270,6 +347,8 @@ def extract_and_transform_bbox(
                 "bbox": [ymin, xmin, ymax, xmax],
                 "bbox_wgs84": bbox_wgs84,
                 "pixel_bbox": pixel_bbox,
+                "cleaned_text": cleaned_text,
+                "spatial_tokens": spatial_boxes,
                 "geojson": {
                     "type": "FeatureCollection",
                     "features": [feature],
@@ -333,6 +412,8 @@ def extract_and_transform_bbox(
             "bbox": [ymin, xmin, ymax, xmax],
             "bbox_wgs84": bbox_wgs84,
             "pixel_bbox": pixel_bbox,
+            "cleaned_text": cleaned_text,
+            "spatial_tokens": spatial_boxes,
             "geojson": {
                 "type": "FeatureCollection",
                 "features": [feature],

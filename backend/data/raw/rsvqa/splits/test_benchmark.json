@@ -1,0 +1,50 @@
+[
+  {
+    "image": "images/rsvqa_001.tif",
+    "question": "Is there a water body visible in this satellite patch?",
+    "answer": "yes",
+    "type": "presence"
+  },
+  {
+    "image": "images/rsvqa_002.tif",
+    "question": "Are cargo vessels docked in this agricultural zone?",
+    "answer": "no",
+    "type": "presence"
+  },
+  {
+    "image": "images/rsvqa_003.tif",
+    "question": "How many large industrial structures are present?",
+    "answer": "2",
+    "type": "count"
+  },
+  {
+    "image": "images/rsvqa_004.tif",
+    "question": "How many airport runways are visible?",
+    "answer": "1",
+    "type": "count"
+  },
+  {
+    "image": "images/rsvqa_005.tif",
+    "question": "Are there more residential buildings than vegetation zones?",
+    "answer": "no",
+    "type": "comparison"
+  },
+  {
+    "image": "images/rsvqa_006.tif",
+    "question": "Is the water reservoir larger than the urban parcel?",
+    "answer": "yes",
+    "type": "comparison"
+  },
+  {
+    "image": "images/rsvqa_007.tif",
+    "question": "Is this scene predominantly rural or urban?",
+    "answer": "urban",
+    "type": "rural_urban"
+  },
+  {
+    "image": "images/rsvqa_008.tif",
+    "question": "Is an active transportation roadway crossing the region?",
+    "answer": "yes",
+    "type": "presence"
+  }
+]
