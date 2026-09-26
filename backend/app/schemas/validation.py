@@ -6,10 +6,87 @@ non-file form fields after the controller has parsed GeoTIFFs.
 
 from __future__ import annotations
 
+import math
+import uuid
+from datetime import date, datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+import numpy as np
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
+
+
+def sanitize_for_json(obj: Any) -> Any:
+    """Recursively converts NumPy arrays, scalars, tensors, and non-serializable objects into native Python types."""
+    if obj is None:
+        return None
+    if isinstance(obj, bool):
+        return bool(obj)
+    if isinstance(obj, int) and not isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, float) and not isinstance(obj, (np.floating,)):
+        return 0.0 if (math.isnan(obj) or math.isinf(obj)) else float(obj)
+    if isinstance(obj, (str, bytes)):
+        return str(obj) if isinstance(obj, str) else obj.decode("utf-8", errors="replace")
+    if isinstance(obj, Path):
+        return str(obj)
+    if isinstance(obj, (date, datetime)):
+        return obj.isoformat()
+    if isinstance(obj, uuid.UUID):
+        return str(obj)
+
+    # NumPy ndarray -> python lists
+    if isinstance(obj, np.ndarray):
+        return [sanitize_for_json(item) for item in obj.tolist()]
+
+    # NumPy scalar types -> native float / int / bool
+    if isinstance(obj, (np.floating,)):
+        val = float(obj.item())
+        return 0.0 if (math.isnan(val) or math.isinf(val)) else val
+    if isinstance(obj, (np.integer,)):
+        return int(obj.item())
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj.item())
+
+    # PyTorch Tensor
+    if hasattr(obj, "detach") and hasattr(obj, "cpu"):
+        try:
+            return sanitize_for_json(obj.detach().cpu().numpy())
+        except Exception:
+            pass
+
+    # Generic converters
+    if hasattr(obj, "tolist") and callable(getattr(obj, "tolist")):
+        try:
+            return sanitize_for_json(obj.tolist())
+        except Exception:
+            pass
+    if hasattr(obj, "item") and callable(getattr(obj, "item")):
+        try:
+            return sanitize_for_json(obj.item())
+        except Exception:
+            pass
+
+    # Pydantic models
+    if hasattr(obj, "model_dump") and callable(getattr(obj, "model_dump")):
+        try:
+            return sanitize_for_json(obj.model_dump())
+        except Exception:
+            pass
+    elif hasattr(obj, "dict") and callable(getattr(obj, "dict")):
+        try:
+            return sanitize_for_json(obj.dict())
+        except Exception:
+            pass
+
+    # Nested structures
+    if isinstance(obj, dict):
+        return {str(k): sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [sanitize_for_json(item) for item in obj]
+
+    return obj
 
 
 class TaskType(str, Enum):
@@ -50,11 +127,21 @@ class AnalyzeResponseEnvelope(BaseModel):
     change_overlay_uri: Optional[str] = None
     trace: dict
 
+    @model_validator(mode="before")
+    @classmethod
+    def sanitize_inputs(cls, data: Any) -> Any:
+        return sanitize_for_json(data)
+
+    @model_serializer(mode="plain")
+    def serialize_model(self) -> dict[str, Any]:
+        raw = {k: getattr(self, k) for k in self.model_fields}
+        return sanitize_for_json(raw)
+
 
 class QueryResponseEnvelope(BaseModel):
     """POST /api/v1/query — answer, OpenLayers geometry, and audit summary."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     status: str = "ok"
     answer: str
@@ -67,6 +154,30 @@ class QueryResponseEnvelope(BaseModel):
     bbox: Optional[list[float]] = None
     change_mask: Optional[dict] = None
     change_overlay_uri: Optional[str] = None
+    t1_preview_url: Optional[str] = None
+    t2_preview_url: Optional[str] = None
+    original_image: Optional[str] = None
+    baseline_image: Optional[str] = None
+    base_image: Optional[str] = None
+    image_t0: Optional[str] = None
+    preview_url: Optional[str] = None
+    overlay_image: Optional[str] = None
+    evidence_image: Optional[str] = None
+    visual_evidence: Optional[str] = None
+    evidence_type: Optional[str] = None
+    detected_task: Optional[str] = None
+    leaflet_bounds: Optional[list[list[float]]] = None
     audit_summary: dict
     trace: dict
     report: dict = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def sanitize_inputs(cls, data: Any) -> Any:
+        return sanitize_for_json(data)
+
+    @model_serializer(mode="plain")
+    def serialize_model(self) -> dict[str, Any]:
+        raw = {k: getattr(self, k) for k in self.model_fields}
+        return sanitize_for_json(raw)
+

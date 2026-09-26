@@ -12,9 +12,18 @@ Prevents silent fallbacks and strictly rejects intent-input mismatches.
 from __future__ import annotations
 
 import logging
+import sys
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("SatQueryRouter")
+
+# Register compatibility alias so app.services.agent.router points directly to this module
+sys.modules.setdefault("app.services.agent.router", sys.modules[__name__])
+sys.modules.setdefault("backend.app.services.agent.router", sys.modules[__name__])
+
+# STRICT LIVE EXECUTION POLICY:
+# All router inspections and model workflows bypass any cached reports in backend/artifacts/reports/.
+# Pre-computed JSON reports are NEVER returned as live query responses.
 
 # Mandated 4 core task types
 TASK_SINGLE_GROUNDING = "single_grounding"
@@ -158,7 +167,6 @@ GROUNDING_TRIGGERS = [
     "box",
     "delineate",
     "segment",
-    "identify",
     "tank",
     "storage",
     "silo",
@@ -170,6 +178,32 @@ GROUNDING_TRIGGERS = [
     "airplane",
     "bridge",
     "facility",
+]
+
+# VQA and land cover triggers for single-image VQA workflow
+VQA_TRIGGERS = [
+    "describe",
+    "identify",
+    "what is",
+    "what are",
+    "classify",
+    "classification",
+    "land cover",
+    "landcover",
+    "land-cover",
+    "land use",
+    "terrain",
+    "scene",
+    "dominant class",
+    "corine",
+    "bigearthnet",
+    "vegetation",
+    "crop",
+    "forest",
+    "urban fabric",
+    "surface classification",
+    "scene semantics",
+    "scene classification",
 ]
 
 # Triggers denoting land cover and domain classification (BigEarthNet domain adapter)
@@ -225,10 +259,42 @@ class InputInspectorNode:
                 logger.info("InputInspector: force_task applied -> %s (%s)", normalized, target_internal)
                 return target_internal
 
-        # Temporal intent evaluation
+        # Grounding action verbs
+        GROUNDING_ACTION_VERBS = ["highlight", "segment", "locate", "delineate"]
+        has_grounding_verb = any(v in q for v in GROUNDING_ACTION_VERBS)
+
+        # Explicit multi-date / bi-temporal comparison phrases
+        EXPLICIT_BITEMPORAL_COMPARISON = [
+            "between these two dates",
+            "between two dates",
+            "between the two dates",
+            "between these dates",
+            "between dates",
+            "between the dates",
+            "between two images",
+            "between these two images",
+            "between these images",
+            "what changed between",
+            "what has changed between",
+            "changed between",
+            "difference between",
+            "t1 vs t2",
+            "t1 and t2",
+            "before and after",
+            "before vs after",
+            "across both dates",
+            "two dates",
+            "both dates",
+            "increased, decreased, or remained unchanged",
+            "increased or decreased",
+            "has the built-up area increased",
+        ]
+        is_explicit_bitemporal = any(p in q for p in EXPLICIT_BITEMPORAL_COMPARISON)
+
+        # Temporal intent evaluation: ignore casual temporal words if a grounding action verb is present
         has_temporal_phrase = any(phrase in q for phrase in TEMPORAL_PHRASES)
         has_temporal_token = any(word in q.split() for word in TEMPORAL_WORDS)
-        has_temporal = has_temporal_phrase or has_temporal_token or "between" in q
+        has_temporal = (has_temporal_phrase or has_temporal_token or "between" in q) and not (has_grounding_verb and not is_explicit_bitemporal)
 
         # Cross-modal intent evaluation
         has_sar_keyword = any(k in q for k in ["sar", "radar", "sentinel-1", "risat", "c-band"])
@@ -260,6 +326,8 @@ class InputInspectorNode:
         if files is None:
             if has_cross_modal_keyword or (has_optical_keyword and has_sar_keyword):
                 return INTERNAL_CROSS_MODAL
+            if has_grounding_verb and not is_explicit_bitemporal:
+                return INTERNAL_SINGLE_GROUNDING
             if has_temporal:
                 return INTERNAL_BITEMPORAL_CHANGE
             if any(gt in q for gt in GROUNDING_TRIGGERS):
@@ -298,14 +366,17 @@ class InputInspectorNode:
                     "but only 1 image was provided. Please upload both modalities to execute joint analysis."
                 )
 
-            # Route land cover and terrain classification to single_vqa (BigEarthNet domain adapter)
-            if any(lt in q for lt in LANDCOVER_TRIGGERS):
-                logger.info("InputInspector: 1 image + land-cover intent -> %s (BigEarthNet adapter)", INTERNAL_SINGLE_VQA)
+            # If query is asking for general description or land-cover without grounding verbs -> VQA
+            is_vqa_intent = any(vt in q for vt in VQA_TRIGGERS) or any(lt in q for lt in LANDCOVER_TRIGGERS)
+            is_explicit_grounding = has_grounding_verb or any(gt in q for gt in ["ground", "highlight", "where is", "where are", "locate", "find", "draw a box", "bounding box", "isolate", "outline"])
+
+            if is_vqa_intent and not is_explicit_grounding:
+                logger.info("InputInspector: 1 image + VQA / land-cover intent -> %s (BigEarthNet adapter)", INTERNAL_SINGLE_VQA)
                 return INTERNAL_SINGLE_VQA
 
-            # Route to Grounding or VQA
-            if any(gt in q for gt in GROUNDING_TRIGGERS):
-                logger.info("InputInspector: 1 image + grounding trigger -> %s", INTERNAL_SINGLE_GROUNDING)
+            # Route to Grounding or VQA: prioritize grounding action verbs & triggers
+            if is_explicit_grounding or any(gt in q for gt in GROUNDING_TRIGGERS):
+                logger.info("InputInspector: 1 image + grounding action/trigger -> %s", INTERNAL_SINGLE_GROUNDING)
                 return INTERNAL_SINGLE_GROUNDING
 
             logger.info("InputInspector: 1 image + scene semantic query -> %s", INTERNAL_SINGLE_VQA)
@@ -322,6 +393,11 @@ class InputInspectorNode:
         if has_sar_keyword and not has_temporal_phrase:
             logger.info("InputInspector: 2 images with SAR radar context -> %s", INTERNAL_CROSS_MODAL)
             return INTERNAL_CROSS_MODAL
+
+        # Grounding action verbs without explicit temporal comparison route to single-image grounding
+        if has_grounding_verb and not is_explicit_bitemporal and not has_temporal_phrase:
+            logger.info("InputInspector: Grounding action verb without temporal comparison -> %s", INTERNAL_SINGLE_GROUNDING)
+            return INTERNAL_SINGLE_GROUNDING
 
         # For 2 images, default strictly to bi-temporal change analysis (never fall back to single grounding)
         logger.info(

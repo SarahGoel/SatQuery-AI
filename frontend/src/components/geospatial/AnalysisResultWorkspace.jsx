@@ -311,19 +311,41 @@ export default function AnalysisResultWorkspace({
                 <>
                   {/* Base Satellite Image */}
                   <img
-                    src={analysisData.baseImage}
+                    src={
+                      analysisData.baseImage ||
+                      analysisData.original_image ||
+                      analysisData.baseline_image ||
+                      analysisData.t1_preview_url ||
+                      "/satellite/water-optical.jpg"
+                    }
                     alt="Satellite Baseline Imagery"
                     className="w-full h-full object-cover select-none"
+                    onError={(e) => {
+                      if (e.target && !e.target.src.endsWith("/satellite/water-optical.jpg")) {
+                        e.target.src = "/satellite/water-optical.jpg";
+                      }
+                    }}
                   />
 
                   {/* Visual Evidence Layer Overlay with dynamic opacity */}
                   {activeView === "overlay" && (
                     <img
-                      src={analysisData.evidenceImage}
+                      src={
+                        analysisData.evidenceImage ||
+                        analysisData.overlay_image ||
+                        analysisData.change_overlay_uri ||
+                        analysisData.visual_evidence ||
+                        "/satellite/water-result.jpg"
+                      }
                       alt="Satellite Visual Evidence Overlay"
                       className="absolute inset-0 w-full h-full object-cover select-none transition-opacity duration-200"
                       style={{
                         opacity: overlayOpacity / 100,
+                      }}
+                      onError={(e) => {
+                        if (e.target && !e.target.src.endsWith("/satellite/water-result.jpg")) {
+                          e.target.src = "/satellite/water-result.jpg";
+                        }
                       }}
                     />
                   )}
@@ -341,7 +363,11 @@ export default function AnalysisResultWorkspace({
                     <div className="absolute top-3 right-3 pointer-events-none z-10">
                       <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-cyan-950/85 backdrop-blur-xs border border-cyan-700/80 text-[10px] font-semibold text-cyan-300 shadow-sm">
                         <Layers className="w-3 h-3" />
-                        <span>{analysisData.evidenceType}</span>
+                        <span>
+                          {analysisData.evidenceType ||
+                            analysisData.visual_evidence_type ||
+                            (analysisData.detectedTask ? `${analysisData.detectedTask} Mask` : "Visual Evidence Mask")}
+                        </span>
                       </div>
                     </div>
                   )}
@@ -477,7 +503,7 @@ export default function AnalysisResultWorkspace({
                     <span>Detected task:</span>
                   </div>
                   <span className="font-semibold text-slate-900 dark:text-white">
-                    {analysisData?.detectedTask || "Single Image Vqa"}
+                    {analysisData?.detectedTask || analysisData?.detected_task || "Single Image Vqa"}
                   </span>
                 </div>
 
@@ -507,7 +533,7 @@ export default function AnalysisResultWorkspace({
                     <span>Visual evidence:</span>
                   </div>
                   <span className="font-semibold text-slate-900 dark:text-white">
-                    {analysisData?.evidenceType || "Single Image Vqa Mask"}
+                    {analysisData?.evidenceType || analysisData?.visual_evidence_type || "Visual Evidence Mask"}
                   </span>
                 </div>
 

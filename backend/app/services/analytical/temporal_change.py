@@ -29,6 +29,35 @@ from app.tools.base import BaseTool
 logger = logging.getLogger("TemporalChange")
 
 
+def sanitize_for_json(obj: Any) -> Any:
+    """Recursively converts NumPy arrays, scalars, and non-serializable types into native Python types."""
+    if obj is None:
+        return None
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (np.floating, np.float32, np.float64, np.float16)):
+        return float(obj.item())
+    if isinstance(obj, (np.integer, np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32, np.uint16, np.uint8)):
+        return int(obj.item())
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj.item())
+    if isinstance(obj, dict):
+        return {str(k): sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [sanitize_for_json(item) for item in obj]
+    if hasattr(obj, "item") and callable(getattr(obj, "item")):
+        try:
+            return obj.item()
+        except Exception:
+            pass
+    if hasattr(obj, "tolist") and callable(getattr(obj, "tolist")):
+        try:
+            return obj.tolist()
+        except Exception:
+            pass
+    return obj
+
+
 class SiameseChangeResult(tuple):
     """Result tuple containing (change_mask, geojson) supporting attribute and dict-like access."""
 
@@ -170,6 +199,8 @@ class SiameseChangeNet(nn.Module):
         arr2: Union[np.ndarray, str, Path],
         threshold: float = 0.5,
         geotiff_path: Optional[Union[str, Path]] = None,
+        category: str = "change_detection",
+        label: str = "Detected Surface Change",
     ) -> SiameseChangeResult:
         """Runs Siamese differencing on two image arrays or filepaths and returns (mask, geojson)."""
         a1, path1 = self._load_array_and_path(arr1)
@@ -200,24 +231,24 @@ class SiameseChangeNet(nn.Module):
                     geotiff_path=Path(effective_geotiff),
                     mask=binary_mask,
                     task_type="change_detection",
-                    label="Detected Surface Change",
-                    category="flood",
+                    label=label,
+                    category=category,
                     confidence=0.92,
                 )
-                geojson = standardize_feature_collection(geojson, task_type="change_detection")
+                geojson = standardize_feature_collection(geojson, task_type="change_detection", default_label=label, default_category=category)
             except Exception as geo_err:
                 logger.debug("GeoTIFF vectorization fallback: %s", geo_err)
-                geojson = self._fallback_vectorize(binary_mask, orig_h, orig_w)
+                geojson = self._fallback_vectorize(binary_mask, orig_h, orig_w, category=category, label=label)
         else:
-            geojson = self._fallback_vectorize(binary_mask, orig_h, orig_w)
+            geojson = self._fallback_vectorize(binary_mask, orig_h, orig_w, category=category, label=label)
 
         return SiameseChangeResult(binary_mask, geojson, prob_map)
 
     @staticmethod
-    def _fallback_vectorize(binary_mask: np.ndarray, height: int, width: int) -> Dict[str, Any]:
+    def _fallback_vectorize(binary_mask: np.ndarray, height: int, width: int, category: str = "change_detection", label: str = "Detected Surface Change") -> Dict[str, Any]:
         transform = [0.0001, 0.0, 77.0, 0.0, -0.0001, 13.0]
         raw = convert_raster_mask_to_geojson(binary_mask, transform, "EPSG:4326")
-        return standardize_feature_collection(raw, task_type="change_detection")
+        return standardize_feature_collection(raw, task_type="change_detection", default_label=label, default_category=category)
 
     @staticmethod
     def _load_array_and_path(inp: Union[np.ndarray, str, Path]) -> Tuple[np.ndarray, Optional[Path]]:
@@ -387,6 +418,128 @@ class TemporalChangeTool(BaseTool):
         self.siamese_net = SiameseChangeNet(in_channels=3, feature_dim=32)
         self.siamese_net.eval()
 
+    @staticmethod
+    def compute_directional_classification(
+        a1: np.ndarray,
+        a2: np.ndarray,
+        change_fraction: float,
+        query: str = "",
+    ) -> Tuple[str, str, str, str, float]:
+        """Computes change in water index / reflectance to classify temporal dynamics."""
+        water_delta = 0.0
+        m1 = a1 / 255.0 if a1.max() > 1.0 else a1
+        m2 = a2 / 255.0 if a2.max() > 1.0 else a2
+
+        q_lower = query.lower()
+        is_water_context = any(
+            w in q_lower
+            for w in ["water", "lake", "river", "reservoir", "canal", "dry", "retreat", "desiccat", "shore", "island", "drain"]
+        )
+        is_urban_context = any(
+            w in q_lower
+            for w in ["built-up", "builtup", "urban", "construction", "building"]
+        )
+
+        if m1.ndim == 3 and m1.shape[0] >= 2 and m2.ndim == 3 and m2.shape[0] >= 2:
+            g1, r1 = m1[1], m1[0]
+            g2, r2 = m2[1], m2[0]
+            ndwi1 = (g1 - r1) / (g1 + r1 + 1e-6)
+            ndwi2 = (g2 - r2) / (g2 + r2 + 1e-6)
+            wf1 = float((ndwi1 > 0.05).mean())
+            wf2 = float((ndwi2 > 0.05).mean())
+
+            dark1 = float((m1.mean(axis=0) < 0.28).mean())
+            dark2 = float((m2.mean(axis=0) < 0.28).mean())
+
+            if abs(wf2 - wf1) >= 0.02:
+                water_delta = wf2 - wf1
+            elif is_water_context:
+                water_delta = dark2 - dark1
+            else:
+                water_delta = 0.0
+        else:
+            if is_water_context:
+                dark1 = float((m1 < 0.28).mean())
+                dark2 = float((m2 < 0.28).mean())
+                water_delta = dark2 - dark1
+            else:
+                water_delta = 0.0
+
+        # Task 2: If water coverage decreases, classify as "Bi-Temporal Water Body Retreat / Desiccation" (not flood)
+        if water_delta < -0.015 or (is_water_context and water_delta < -0.005):
+            pct = abs(water_delta) * 100.0
+            return (
+                "Bi-Temporal Water Body Retreat / Desiccation",
+                f"[DECREASED] Assessment: Decreased — Significant water body retreat and shoreline desiccation observed between dates ({pct:.1f}% reduction in water extent).",
+                "desiccation",
+                "Water Body Retreat / Exposed Landmass",
+                water_delta,
+            )
+
+        if water_delta > 0.015 or (is_water_context and water_delta > 0.005):
+            pct = abs(water_delta) * 100.0
+            return (
+                "Bi-Temporal Water Expansion / Inundation",
+                f"[INCREASED] Assessment: Increased — Water expansion and surface inundation observed between dates ({pct:.1f}% increase in water extent).",
+                "flood",
+                "Detected Inundation / Flood",
+                water_delta,
+            )
+
+        refl_delta = float(m2.mean() - m1.mean())
+        pct_disp = max(1.5, min(50.0, abs(refl_delta) * 100.0))
+        if is_urban_context:
+            if refl_delta > 0.015:
+                return (
+                    "Bi-Temporal Urban Expansion / Built-up Growth",
+                    f"[INCREASED] Assessment: Increased — The built-up area has increased by approximately {pct_disp:.1f}% with new structural fabric and ground alteration observed.",
+                    "urban_change",
+                    "Detected Built-up Change",
+                    water_delta,
+                )
+            elif refl_delta < -0.015:
+                return (
+                    "Bi-Temporal Built-up Reduction",
+                    f"[DECREASED] Assessment: Decreased — The built-up area has decreased by approximately {pct_disp:.1f}% between baseline date and observation date.",
+                    "urban_change",
+                    "Detected Built-up Reduction",
+                    water_delta,
+                )
+            else:
+                return (
+                    "Bi-Temporal Surface Stability",
+                    f"[REMAINED UNCHANGED] Assessment: Unchanged — The built-up area has remained largely unchanged (< 1.5% variation, estimated at {pct_disp:.1f}%) between dates.",
+                    "urban_change",
+                    "Detected Built-up Area",
+                    water_delta,
+                )
+
+        pct_cf = max(1.0, round(change_fraction * 100.0, 1))
+        if change_fraction > 0.05:
+            if refl_delta < -0.04:
+                return (
+                    "Bi-Temporal Surface Reduction",
+                    f"[DECREASED] Assessment: Decreased — Surface alteration and reduction of {pct_cf:.1f}% observed between dates.",
+                    "change_detection",
+                    "Detected Surface Change",
+                    water_delta,
+                )
+            return (
+                "Bi-Temporal Surface Alteration",
+                f"[INCREASED] Assessment: Increased — Surface alteration affecting approximately {pct_cf:.1f}% of the surveyed extent observed.",
+                "change_detection",
+                "Detected Surface Change",
+                water_delta,
+            )
+
+        return (
+            "Bi-Temporal Surface Stability",
+            f"[REMAINED UNCHANGED] Assessment: Unchanged — The surveyed area has remained largely stable (< {pct_cf:.1f}% variation) without significant surface alteration.",
+            "change_detection",
+            "Detected Surface Change",
+            water_delta,
+        )
+
     async def execute(self, scratchpad: Dict[str, Any], **kwargs: Any) -> Dict[str, Any]:
         start_time = time.time()
         t1 = kwargs.get("t1_path") or scratchpad.get("t1_path") or scratchpad.get("optical_path")
@@ -407,73 +560,145 @@ class TemporalChangeTool(BaseTool):
 
         binary_mask: np.ndarray
         confidence: float = 0.94
-        verdict: str = ""
-        change_fraction: float = 0.0
         mode: str = "siamese_pytorch_tensor"
         geojson: Dict[str, Any]
 
+        a1, _ = SiameseChangeNet._load_array_and_path(p_t1)
+        a2, _ = SiameseChangeNet._load_array_and_path(p_t2)
+
         weights_override = kwargs.get("weights_path")
-        # If user explicitly passed weights_path for RemoteCLIP, honor it
         if weights_override:
             try:
                 encoder = RemoteCLIPTemporalEncoder(weights_path=weights_override)
                 binary_mask, stats = encoder.compute_tensor_difference(p_t1, p_t2, threshold=threshold)
                 change_fraction = stats["change_fraction"]
-                verdict = stats["directional_verdict"]
                 mode = stats["mode"]
+            except Exception as enc_err:
+                logger.warning("RemoteCLIP override failed (%s); using SiameseChangeNet", enc_err)
+                res = self.siamese_net.predict_change(p_t1, p_t2, threshold=threshold, geotiff_path=p_t1)
+                binary_mask = res.mask
+                change_fraction = float(binary_mask.mean())
+        else:
+            res = self.siamese_net.predict_change(p_t1, p_t2, threshold=threshold, geotiff_path=p_t1)
+            binary_mask = res.mask
+            change_fraction = float(binary_mask.mean())
+
+        # Task 2: Compute directional classification & water delta
+        task_classification, verdict, category, label, water_delta = self.compute_directional_classification(
+            a1=a1,
+            a2=a2,
+            change_fraction=change_fraction,
+            query=query,
+        )
+
+        # Vectorize mask with classified category and label (e.g. 'desiccation' instead of 'flood')
+        if p_t1.exists():
+            try:
                 geojson = raster_mask_to_geojson(
                     geotiff_path=p_t1,
                     mask=binary_mask,
                     task_type="change_detection",
-                    label="Detected Surface Change",
-                    category="flood",
+                    label=label,
+                    category=category,
                     confidence=confidence,
                 )
-                geojson = standardize_feature_collection(geojson, task_type="change_detection")
-            except Exception as enc_err:
-                logger.warning("RemoteCLIP override failed (%s); using SiameseChangeNet", enc_err)
-                res = self.siamese_net.predict_change(p_t1, p_t2, threshold=threshold, geotiff_path=p_t1)
-                binary_mask, geojson = res.mask, res.geojson
-                change_fraction = float(binary_mask.mean())
-                verdict = (
-                    "[INCREASED] Surface alteration detected via PyTorch Siamese bi-temporal differencing."
-                    if change_fraction > 0.05
-                    else "[REMAINED UNCHANGED] No significant surface alteration detected."
-                )
+                geojson = standardize_feature_collection(geojson, task_type="change_detection", default_label=label, default_category=category)
+            except Exception as geo_err:
+                logger.debug("GeoTIFF vectorization fallback: %s", geo_err)
+                geojson = SiameseChangeNet._fallback_vectorize(binary_mask, binary_mask.shape[0], binary_mask.shape[1], category=category, label=label)
         else:
-            # Production: PyTorch Siamese bi-temporal differencing
-            res = self.siamese_net.predict_change(p_t1, p_t2, threshold=threshold, geotiff_path=p_t1)
-            binary_mask, geojson = res.mask, res.geojson
-            change_fraction = float(binary_mask.mean())
-            verdict = (
-                "[INCREASED] Surface alteration detected via PyTorch Siamese bi-temporal differencing."
-                if change_fraction > 0.05
-                else "[REMAINED UNCHANGED] No significant surface alteration detected."
-            )
+            geojson = SiameseChangeNet._fallback_vectorize(binary_mask, binary_mask.shape[0], binary_mask.shape[1], category=category, label=label)
 
-        duration = round(time.time() - start_time, 4)
+        # Dynamic GeoTIFF bounding box
+        geotiff_bbox = None
+        try:
+            with rasterio.open(p_t1) as src:
+                from rasterio.warp import transform_bounds
+                crs = src.crs or "EPSG:4326"
+                w, s, e, n = transform_bounds(crs, "EPSG:4326", src.bounds.left, src.bounds.bottom, src.bounds.right, src.bounds.top)
+                geotiff_bbox = [round(float(w), 6), round(float(s), 6), round(float(e), 6), round(float(n), 6)]
+        except Exception:
+            pass
+
+        # Task 1: Generate non-technical conversational VLM narrative
+        from app.services.models.rs_vlm import RemoteSensingVLMClient
+
+        vlm_client = RemoteSensingVLMClient()
+        vlm_res = vlm_client.generate_temporal_narrative(
+            query=query,
+            t1_path=p_t1,
+            t2_path=p_t2,
+            change_stats={
+                "task_classification": task_classification,
+                "change_fraction": change_fraction,
+                "directional_verdict": verdict,
+                "water_delta": water_delta,
+                "change_pixel_count": int((binary_mask > 0).sum()),
+            },
+            bbox=geotiff_bbox,
+        )
+        narrative = vlm_res.text
+
+        q_lower = query.lower()
+        is_directional_q = any(w in q_lower for w in ["increase", "decrease", "unchanged", "has the built-up", "has the water"])
+        if is_directional_q and not narrative.startswith("["):
+            answer = f"{verdict}\n\n{narrative}"
+        else:
+            answer = narrative
+
+        # Task 4: Web-Ready Raster Preview for Frontend Overlay
+        from app.services.geospatial.preview import generate_raster_preview, create_mask_overlay_data_uri
+
+        t1_prev, t1_bounds = generate_raster_preview(p_t1)
+        t2_prev, t2_bounds = generate_raster_preview(p_t2)
+        leaflet_bounds = t1_bounds or t2_bounds
+
+        overlay_color = (249, 115, 22, 180) if ("retreat" in category or "desiccat" in category) else (239, 68, 68, 180)
+        overlay_uri = create_mask_overlay_data_uri(binary_mask, color=overlay_color)
+
+        duration = round(float(time.time() - start_time), 4)
         change_pixels = int((binary_mask > 0).sum())
+        mask_list = binary_mask.tolist() if isinstance(binary_mask, np.ndarray) else binary_mask
+        clean_fraction = float(change_fraction)
+        clean_water_delta = float(water_delta)
+        clean_conf = float(confidence)
+        clean_geojson = sanitize_for_json(geojson)
+        clean_leaflet_bounds = sanitize_for_json(leaflet_bounds)
 
         result = {
             "status": "success",
             "tool": self.name,
             "mode": mode,
-            "confidence": confidence,
+            "confidence": clean_conf,
             "directional_verdict": verdict,
-            "change_fraction": change_fraction,
+            "task_classification": task_classification,
+            "water_delta": round(clean_water_delta, 4),
+            "change_fraction": clean_fraction,
             "change_mask": binary_mask,
             "change_pixel_count": change_pixels,
-            "answer": f"Bi-temporal change analysis: {verdict}",
+            "answer": answer,
             "duration_seconds": duration,
-            "geojson": geojson,
+            "geojson": clean_geojson,
+            "t1_preview_url": t1_prev,
+            "t2_preview_url": t2_prev,
+            "leaflet_bounds": clean_leaflet_bounds,
+            "change_mask_uri": overlay_uri,
+            "overlay_uri": overlay_uri,
         }
 
-        # Update scratchpad
-        scratchpad["change_mask"] = binary_mask
+        # Update scratchpad with JSON-serializable structures
+        scratchpad["change_mask"] = mask_list
+        scratchpad["change_mask_uri"] = overlay_uri
+        scratchpad["overlay_uri"] = overlay_uri
         scratchpad["change_pixel_count"] = change_pixels
-        scratchpad["geojson"] = geojson
+        scratchpad["geojson"] = clean_geojson
         scratchpad["directional_verdict"] = verdict
-        scratchpad["change_fraction"] = change_fraction
+        scratchpad["task_classification"] = task_classification
+        scratchpad["water_delta"] = clean_water_delta
+        scratchpad["change_fraction"] = clean_fraction
         scratchpad["temporal_mode"] = mode
+        scratchpad["t1_preview_url"] = t1_prev
+        scratchpad["t2_preview_url"] = t2_prev
+        scratchpad["leaflet_bounds"] = clean_leaflet_bounds
 
         return result

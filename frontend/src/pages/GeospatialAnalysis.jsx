@@ -85,10 +85,11 @@ function formatBackendResponse(payload, userQuery, attachedFiles) {
   }
   const audit = payload.audit_summary || {};
   const trace = payload.trace || {};
-  const rawTask = audit.selected_task || trace.task || "geospatial_intelligence";
-  const formattedTask = rawTask
+  const rawTask = payload.task_type || audit.selected_task || trace.task || "geospatial_intelligence";
+  const detectedTask = payload.detected_task || audit.detected_task || rawTask
     .replace(/_/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase());
+  const formattedTask = detectedTask;
 
   const hasExplicitBounds =
     (Array.isArray(audit.bounds) && audit.bounds.length >= 4 && audit.bounds.some((b) => b !== 0)) ||
@@ -102,33 +103,85 @@ function formatBackendResponse(payload, userQuery, attachedFiles) {
 
   const firstAttached = attachedFiles?.[0];
   const baseImage =
+    payload.original_image ||
+    payload.baseline_image ||
+    payload.base_image ||
+    payload.image_t0 ||
+    payload.preview_url ||
+    payload.t1_preview_url ||
     firstAttached?.baseImage ||
     firstAttached?.preview ||
     "/satellite/water-optical.jpg";
 
-  const isChangeOrFlood =
-    rawTask.includes("change") ||
-    rawTask.includes("bitemporal") ||
-    rawTask.includes("temporal");
+  let evidenceImage =
+    payload.overlay_image ||
+    payload.evidence_image ||
+    payload.change_overlay_uri ||
+    payload.visual_evidence ||
+    audit.change_overlay_uri;
 
-  let evidenceImage = payload.change_overlay_uri || audit.change_overlay_uri;
-  if (!evidenceImage || (!evidenceImage.startsWith("http") && !evidenceImage.startsWith("/") && !evidenceImage.startsWith("data:"))) {
+  const isValidImgSrc = (src) => {
+    if (!src || typeof src !== "string") return false;
+    const trimmed = src.trim();
+    if (trimmed.endsWith(".npy")) return false;
+    return (
+      trimmed.startsWith("data:image/") ||
+      trimmed.startsWith("http://") ||
+      trimmed.startsWith("https://") ||
+      trimmed.startsWith("/satellite/") ||
+      trimmed.startsWith("/")
+    );
+  };
+
+  if (!isValidImgSrc(evidenceImage)) {
     if (attachedFiles?.[1]?.baseImage) {
       evidenceImage = attachedFiles[1].baseImage;
     } else if (firstAttached?.resultImage) {
       evidenceImage = firstAttached.resultImage;
     } else {
       const qLower = (userQuery || "").toLowerCase();
-      const taskLower = rawTask.toLowerCase();
-      if (qLower.includes("flood") || qLower.includes("yamuna") || qLower.includes("inundat")) {
+      const taskLower = (detectedTask || rawTask).toLowerCase();
+      if (
+        qLower.includes("retreat") ||
+        qLower.includes("desiccat") ||
+        qLower.includes("dry") ||
+        qLower.includes("shrink") ||
+        qLower.includes("drought") ||
+        taskLower.includes("desiccat")
+      ) {
+        evidenceImage = "/satellite/water-result.jpg";
+      } else if (
+        qLower.includes("flood") ||
+        qLower.includes("yamuna") ||
+        qLower.includes("inundat") ||
+        taskLower.includes("flood")
+      ) {
         evidenceImage = "/satellite/flood-result.jpg";
-      } else if (taskLower.includes("grounding") || qLower.includes("rooftop") || qLower.includes("building") || qLower.includes("industrial")) {
+      } else if (
+        taskLower.includes("grounding") ||
+        qLower.includes("rooftop") ||
+        qLower.includes("building") ||
+        qLower.includes("industrial")
+      ) {
         evidenceImage = "/satellite/grounding.jpg";
-      } else if (taskLower.includes("change") || qLower.includes("change") || qLower.includes("between")) {
+      } else if (
+        taskLower.includes("change") ||
+        qLower.includes("change") ||
+        qLower.includes("between")
+      ) {
         evidenceImage = "/satellite/landcover-change.jpg";
-      } else if (taskLower.includes("vegetation") || qLower.includes("vegetation") || qLower.includes("crop") || qLower.includes("ndvi")) {
+      } else if (
+        taskLower.includes("vegetation") ||
+        qLower.includes("vegetation") ||
+        qLower.includes("crop") ||
+        qLower.includes("ndvi")
+      ) {
         evidenceImage = "/satellite/vegetation-ndvi.jpg";
-      } else if (qLower.includes("airport") || qLower.includes("plane") || qLower.includes("aircraft")) {
+      } else if (
+        qLower.includes("airport") ||
+        qLower.includes("plane") ||
+        qLower.includes("aircraft")
+      ) {
         evidenceImage = "/satellite/airport-result.jpg";
       } else {
         evidenceImage = "/satellite/water-result.jpg";
@@ -141,7 +194,14 @@ function formatBackendResponse(payload, userQuery, attachedFiles) {
 
   const answer = payload.answer || audit.output || "Autonomous satellite intelligence analysis completed.";
 
-  const modelsUsed = (audit.model_names || []).join(" + ") || (isChangeOrFlood ? "CD-VQA-Pro + TemporalChangeVQA" : "RS-Grounding-V3");
+  const isChangeDetection =
+    rawTask.toLowerCase().includes("change") ||
+    rawTask.toLowerCase().includes("bitemporal") ||
+    rawTask.toLowerCase().includes("temporal") ||
+    detectedTask.toLowerCase().includes("desiccation") ||
+    detectedTask.toLowerCase().includes("change");
+
+  const modelsUsed = (audit.model_names || []).join(" + ") || (isChangeDetection ? "CD-VQA-Pro + TemporalChangeVQA" : "RS-Grounding-V3");
   const modalitiesUsed = (audit.modalities || []).join(", ") || (attachedFiles?.length >= 2 ? "Bi-Temporal Optical Multi-Epoch (T1/T2)" : "Optical RGB (10m GSD)");
 
   const keyFindings = [
@@ -165,10 +225,13 @@ function formatBackendResponse(payload, userQuery, attachedFiles) {
     `Analyze spatial feature changes against baseline imagery`,
   ];
 
-  const evidenceType = isChangeOrFlood ? "Bi-Temporal Flood Inundation Mask" : `${formattedTask} Mask`;
-  const headline = payload.headline || (isChangeOrFlood
-    ? `Bi-Temporal Flood Inundation Delineation — ${audit.trace_id || "Analysis Complete"}`
-    : `${formattedTask} — ${audit.trace_id || "Complete"}`);
+  const evidenceType =
+    payload.evidence_type ||
+    payload.visual_evidence_type ||
+    (payload.detected_task
+      ? (payload.detected_task.toLowerCase().endsWith("mask") ? payload.detected_task : `${payload.detected_task} Mask`)
+      : (isChangeDetection ? "Surface Water Desiccation Extent Mask" : `${formattedTask} Mask`));
+  const headline = payload.headline || `${detectedTask} — ${audit.trace_id || "Analysis Complete"}`;
 
   const now = new Date();
   const dateStr = now.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
@@ -178,7 +241,7 @@ function formatBackendResponse(payload, userQuery, attachedFiles) {
   const analysisObject = {
     id: audit.trace_id || `SAT-${Date.now()}`,
     traceId: audit.trace_id,
-    detectedTask: isChangeOrFlood ? "Bi-Temporal Flood Delineation" : formattedTask,
+    detectedTask,
     selectedWorkflow: modelsUsed,
     inputModality: modalitiesUsed,
     confidence: confidencePercent,

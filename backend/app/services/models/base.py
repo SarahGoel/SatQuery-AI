@@ -59,8 +59,8 @@ PLAIN_LANGUAGE_SYSTEM = REMOTE_SENSING_SYSTEM_PROMPT
 def _http_post_json(
     url: str,
     body: dict[str, Any],
-    connect_timeout: float = 0.5,
-    read_timeout: float = 300.0,
+    connect_timeout: float = 10.0,
+    read_timeout: float = 180.0,
 ) -> dict[str, Any]:
     """Execute HTTP POST with resilient fallbacks: requests -> httpx -> urllib.request."""
     # 1. Try requests with separate connect/read timeouts
@@ -284,7 +284,7 @@ class LocalVisionLanguageClient:
     def __init__(self) -> None:
         self.backend = settings.INFERENCE_BACKEND.lower()
         self.model = settings.VLM_MODEL_NAME
-        self.timeout = 300.0
+        self.timeout = float(getattr(settings, "OLLAMA_TIMEOUT", 180.0))
         self.ollama_url = settings.resolved_ollama_url
 
     def generate(
@@ -314,42 +314,14 @@ class LocalVisionLanguageClient:
                 logger.warning("bigearthnet_adapter_extraction_failed: %s", ben_err)
 
         effective_prompt = prompt
-        active_classes = payload_note.get("land_cover_classes") or ben_classes
-        if active_classes:
-            classes_str = ", ".join(active_classes)
-            if "land cover" not in prompt.lower() and "terrain" not in prompt.lower():
-                effective_prompt = f"[Surface Land Cover Context: {classes_str}] {prompt}"
 
         try:
             if self.backend == "vllm":
                 return self._vllm(effective_prompt, primary_path, payload_note, images=images)
             return self._ollama(effective_prompt, primary_path, payload_note, images=images)
-        except Exception as exc:  # Keep analyst workflow alive with high-fidelity heuristic generator
-            logger.warning("VLM service unavailable (%s); using high-fidelity heuristic fallback.", exc)
-            try:
-                from app.services.heuristic_vlm import generate_heuristic_summary
-
-                heuristic_text = generate_heuristic_summary(
-                    query=prompt,
-                    task=payload_note.get("task") or payload_note.get("task_type"),
-                    geojson=payload_note.get("geojson"),
-                    metadata=payload_note.get("metadata") or payload_note.get("input_metadata"),
-                    confidence=0.88,
-                    models=[self.model, "Heuristic-Spatial-Synthesizer", "bigearthnet-encoder"],
-                    extra_context=payload_note,
-                )
-            except Exception as h_err:
-                logger.warning("heuristic_summary_failed: %s", h_err)
-                heuristic_text = (
-                    f"Satellite analysis completed for query: \"{prompt.strip()}\". "
-                    f"Surface imagery confirms consistent baseline conditions with verified spatial features."
-                )
-
-            return VLMResult(
-                text=heuristic_text,
-                confidence=0.88,
-                params={"backend": self.backend, "mode": "heuristic_fallback", "error": str(exc), **payload_note},
-            )
+        except Exception as exc:
+            logger.error("VLM service inference failed: %s", exc, exc_info=True)
+            raise
 
     def _ollama(
         self,
@@ -402,12 +374,14 @@ class LocalVisionLanguageClient:
                     "prompt": prompt,
                     "system": PLAIN_LANGUAGE_SYSTEM,
                     "stream": False,
+                    "keep_alive": "10m",
                 }
                 if images_b64:
                     body["images"] = images_b64
 
                 try:
-                    data = _http_post_json(url, body, connect_timeout=0.5, read_timeout=self.timeout)
+                    read_to = float(extra.get("timeout") or getattr(settings, "OLLAMA_TIMEOUT", 180.0) or self.timeout or 180.0)
+                    data = _http_post_json(url, body, connect_timeout=10.0, read_timeout=read_to)
                     text = data.get("response") or data.get("message", {}).get("content") or ""
                     if text.strip():
                         return VLMResult(
@@ -460,7 +434,8 @@ class LocalVisionLanguageClient:
             ],
             "max_tokens": 512,
         }
-        data = _http_post_json(url, body, connect_timeout=0.5, read_timeout=self.timeout)
+        read_to = float(extra.get("timeout") or getattr(settings, "OLLAMA_TIMEOUT", 180.0) or self.timeout or 180.0)
+        data = _http_post_json(url, body, connect_timeout=10.0, read_timeout=read_to)
         text = data["choices"][0]["message"]["content"]
         return VLMResult(
             text=text.strip(),

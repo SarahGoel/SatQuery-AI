@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+from app.schemas.validation import sanitize_for_json
 from app.tools.base import BaseTool
 
 logger = logging.getLogger("SatQueryToolRegistry")
@@ -78,11 +79,11 @@ class WaterGroundingTool(BaseTool):
         }
 
         # Update scratchpad
-        scratchpad["geojson"] = geojson
+        scratchpad["geojson"] = sanitize_for_json(geojson)
         scratchpad["water_features_count"] = feature_count
-        scratchpad["water_mask"] = mask
+        scratchpad["water_mask"] = mask.tolist() if isinstance(mask, np.ndarray) else mask
 
-        return result
+        return sanitize_for_json(result)
 
     def _compute_water_mask(self, image_path: Path, threshold: float) -> np.ndarray:
         """Extracts dark/water surface mask using multi-band green/NIR or luminance."""
@@ -197,13 +198,13 @@ class OpticalSARFusionTool(BaseTool):
         }
 
         # Update scratchpad
-        scratchpad["fused_features"] = cm_result.params
-        scratchpad["indicators"] = indicators
-        scratchpad["fusion_result"] = result
-        scratchpad["geojson"] = geojson
+        scratchpad["fused_features"] = sanitize_for_json(cm_result.params)
+        scratchpad["indicators"] = sanitize_for_json(indicators)
+        scratchpad["fusion_result"] = sanitize_for_json(result)
+        scratchpad["geojson"] = sanitize_for_json(geojson)
         scratchpad["sar_water_threshold_db"] = -18.0
 
-        return result
+        return sanitize_for_json(result)
 
 
 class GeodesicMeasurementTool(BaseTool):
@@ -274,16 +275,16 @@ class GeodesicMeasurementTool(BaseTool):
         }
 
         # Update scratchpad
-        scratchpad["geospatial_metrics"] = metrics
+        scratchpad["geospatial_metrics"] = sanitize_for_json(metrics)
         if geojson:
-            scratchpad["geojson"] = geojson
+            scratchpad["geojson"] = sanitize_for_json(geojson)
 
-        return {
+        return sanitize_for_json({
             "status": "success",
             "tool": self.name,
             "metrics": metrics,
             "duration_seconds": duration,
-        }
+        })
 
 
 class ToolRegistry:

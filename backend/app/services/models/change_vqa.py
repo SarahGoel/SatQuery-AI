@@ -204,6 +204,8 @@ class TemporalChangeVQA:
                 mask_t = (mask_t - mask_t.min()) / (mask_t.max() - mask_t.min() + 1e-6)
             mask = mask_t.squeeze().detach().cpu().numpy()
             token_text = _logits_to_text(logits, query)
+            a1 = t1.squeeze(0).detach().cpu().numpy()
+            a2 = t2.squeeze(0).detach().cpu().numpy()
         else:
             try:
                 with rasterio.open(t1_path) as s1, rasterio.open(t2_path) as s2:
@@ -232,13 +234,17 @@ class TemporalChangeVQA:
                 a1 = a1[:min_c]
                 a2 = a2[:min_c]
 
-            d = np.abs(a1 - a2).mean(axis=0)
-            d_norm = (d - d.min()) / (d.max() - d.min() + 1e-6)
-            mask = d_norm
-            token_text = (
-                f"Satellite change detection analysis for '{query}' shows "
-                f"detected surface changes and feature differences between baseline date T1 and date T2."
-            )
+            try:
+                from app.services.analytical.temporal_change import SiameseChangeNet
+                siamese = SiameseChangeNet()
+                s_res = siamese.predict_change(t1_path, t2_path, geotiff_path=t1_path)
+                mask = s_res.mask.astype(np.float32)
+            except Exception as s_err:
+                logger.debug("SiameseChangeNet fallback in change_vqa: %s", s_err)
+                d = np.abs(a1 - a2).mean(axis=0)
+                d_norm = (d - d.min()) / (d.max() - d.min() + 1e-6)
+                mask = d_norm
+            token_text = "Observable surface alterations and feature differences identified between baseline date T1 and date T2."
 
         # Resample change mask back to native GeoTIFF resolution
         if (mask.shape[0], mask.shape[1]) != (orig_h, orig_w):
@@ -247,33 +253,32 @@ class TemporalChangeVQA:
             except Exception as resize_err:
                 logger.warning("Failed to resize change mask: %s", resize_err)
 
-        # Directional change evaluation (for Query 5 / urban expansion / reduction queries)
+        # Directional change evaluation (for Query 5 / water retreat vs flood / urban expansion)
+        from app.services.analytical.temporal_change import TemporalChangeTool
+
+        task_classification, dir_verdict, class_category, class_label, water_delta = (
+            TemporalChangeTool.compute_directional_classification(
+                a1=a1,
+                a2=a2,
+                change_fraction=float((mask > 0.5).mean()),
+                query=query,
+            )
+        )
         if HAS_TORCH and self.encoder is not None:
             delta_val = float((t2.mean() - t1.mean()) / (t1.mean().abs() + 1e-6))
         else:
             delta_val = float((a2.mean() - a1.mean()) / (abs(a1.mean()) + 1e-6))
 
         pct_val = abs(delta_val) * 100
-        if abs(delta_val) < 0.015:
-            direction_label = "[REMAINED UNCHANGED]"
-            directional_verdict = (
-                f"[REMAINED UNCHANGED] The built-up area has remained largely unchanged "
-                f"(< 1.5% variation, estimated at {pct_val:.1f}%) between the baseline date (T1) and observation date (T2)."
-            )
-        elif delta_val > 0:
+        if "[INCREASED]" in dir_verdict:
             direction_label = "[INCREASED]"
-            pct_disp = max(2.5, min(45.0, pct_val))
-            directional_verdict = (
-                f"[INCREASED] The built-up area has increased by approximately {pct_disp:.1f}% "
-                f"between baseline date (T1) and post-event date (T2), with new structural fabric and ground alteration observed."
-            )
-        else:
+            directional_verdict = dir_verdict
+        elif "[DECREASED]" in dir_verdict:
             direction_label = "[DECREASED]"
-            pct_disp = max(2.5, min(45.0, pct_val))
-            directional_verdict = (
-                f"[DECREASED] The built-up area has decreased by approximately {pct_disp:.1f}% "
-                f"between baseline date (T1) and observation date (T2)."
-            )
+            directional_verdict = dir_verdict
+        else:
+            direction_label = "[REMAINED UNCHANGED]"
+            directional_verdict = dir_verdict
 
         # Localized change footprint computation (for Query 3 / spatial change queries)
         change_bin = (mask > 0.4).astype(np.uint8)
@@ -373,24 +378,55 @@ class TemporalChangeVQA:
             "change_bbox": change_bbox,
             "quadrant": quadrant,
             "is_directional": is_directional,
+            "task_classification": task_classification,
+            "water_delta": water_delta,
+            "category": class_category,
+            "label": class_label,
         }
         if is_directional:
             extra_ctx["directional_verdict"] = directional_verdict
             extra_ctx["direction_label"] = direction_label
 
-        vlm = self.vlm.generate(
-            prompt=vlm_prompt,
-            images=[t1_path, t2_path],
-            extra_context=extra_ctx,
-        )
-        answer = vlm.text
+        if hasattr(self.vlm, "generate_temporal_narrative"):
+            vlm_res = self.vlm.generate_temporal_narrative(
+                query=query,
+                t1_path=t1_path,
+                t2_path=t2_path,
+                change_stats={
+                    "task_classification": task_classification,
+                    "change_fraction": float((mask > 0.5).mean()),
+                    "directional_verdict": directional_verdict,
+                    "water_delta": water_delta,
+                    "quadrant": quadrant,
+                },
+                bbox=None,
+            )
+            vlm_text = vlm_res.text
+            vlm_conf = vlm_res.confidence
+        else:
+            vlm = self.vlm.generate(
+                prompt=vlm_prompt,
+                images=[t1_path, t2_path],
+                extra_context=extra_ctx,
+            )
+            vlm_text = vlm.text
+            vlm_conf = vlm.confidence
+
         if is_directional:
-            if vlm.params.get("stub") or vlm.params.get("mocked") or not answer or answer.startswith("[offline stub]"):
+            if not vlm_text or vlm_text.startswith("[offline stub]"):
                 answer = directional_verdict
-            elif not any(answer.strip().startswith(tag) for tag in ["[INCREASED]", "[DECREASED]", "[REMAINED UNCHANGED]"]):
-                answer = f"{direction_label} {answer}"
-        elif vlm.params.get("stub") or not answer or answer.startswith("[offline stub]"):
-            answer = token_text
+            else:
+                clean_vlm = vlm_text.strip()
+                for tag in ["[INCREASED]", "[DECREASED]", "[REMAINED UNCHANGED]"]:
+                    if clean_vlm.startswith(tag):
+                        clean_vlm = clean_vlm[len(tag):].strip()
+                        break
+                answer = f"{directional_verdict}\n\n{clean_vlm}".strip()
+        elif is_location_query:
+            loc_focus = quadrant or "central"
+            answer = f"{vlm_text} The primary localized surface changes are concentrated in the {loc_focus} sector of the scene."
+        else:
+            answer = vlm_text
 
         params = {
             "module": "TemporalChangeVQA",
@@ -400,37 +436,42 @@ class TemporalChangeVQA:
             "change_bbox": change_bbox,
             "quadrant": quadrant,
             "delta_val": delta_val,
+            "task_classification": task_classification,
+            "water_delta": water_delta,
+            "category": class_category,
+            "label": class_label,
             "is_directional": is_directional,
             "directional_verdict": directional_verdict if is_directional else None,
             "direction_label": direction_label if is_directional else None,
             "tda_channels": self.channels,
             "weights_loaded": bool(HAS_TORCH and (settings.resolved_cdvqa().exists() or (settings.LOCAL_MODELS_DIR / "change_vqa" / "temporal_attn.pt").exists())),
         }
+        try:
+            from app.services.geospatial.preview import create_mask_overlay_data_uri
+            color = (249, 115, 22, 180) if ("retreat" in class_category or "desiccat" in class_category) else (239, 68, 68, 180)
+            overlay_data_uri = create_mask_overlay_data_uri(mask, color=color)
+        except Exception:
+            overlay_data_uri = None
+
         return ChangeVQAResult(
             answer=answer,
             change_mask=mask,
-            confidence=float(np.clip((vlm.confidence + float(mask.mean())) / 2, 0.0, 1.0)),
-            overlay_uri=str(overlay),
+            confidence=float(np.clip((vlm_conf + float(mask.mean())) / 2, 0.0, 1.0)),
+            overlay_uri=overlay_data_uri or str(overlay),
             params=params,
         )
 
 
 def _logits_to_text(logits: Any, query: str) -> str:
     if not HAS_TORCH or logits is None:
-        return (
-            f"Satellite change detection analysis for '{query}' shows "
-            f"detected surface differences between baseline date T1 and date T2."
-        )
+        return "Surface differences and dynamic landscape alterations observed between baseline date T1 and date T2."
     scores = torch.softmax(logits[0], dim=-1)
     topk = torch.topk(scores, k=min(3, scores.numel()))
     tokens = [CHANGE_VOCAB[int(idx)] for idx in topk.indices if CHANGE_VOCAB[int(idx)] != "<pad>"]
     if not tokens:
         tokens = ["no-change"]
     friendly_tokens = [t.replace("-", " ") for t in tokens]
-    return (
-        f"Satellite change detection analysis for '{query}' shows "
-        f"{', '.join(friendly_tokens)} between baseline date T1 and date T2."
-    )
+    return f"Observable surface transitions: {', '.join(friendly_tokens)} between observation dates."
 
 
 def _preview_tensor(path: Path, size: int = 512) -> Any:

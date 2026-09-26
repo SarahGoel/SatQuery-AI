@@ -167,13 +167,13 @@ def test_fix5_bigearthnet_classifier_integration(tmp_path: Path) -> None:
 
     # 2. Agent pipeline integration test
     controller = SatQueryController(db=None)
-    vqa_trace = controller.execute_workflow(
-        query="Describe dominant land cover and scene semantics",
-        filepaths=[str(opt)],
+    cm_trace = controller.execute_workflow(
+        query="Analyze cross-modal fusion with optical and SAR",
+        filepaths=[str(opt), str(sar)],
     )
-    assert vqa_trace.task_type == "single_vqa"
-    vqa_models = [step.model for step in vqa_trace.registry_execution]
-    assert "bigearthnet-encoder" in vqa_models
+    assert cm_trace.task_type == "cross_modal"
+    cm_models = [step.model for step in cm_trace.registry_execution]
+    assert "bigearthnet-encoder" in cm_models
 
 
 def test_empty_or_malformed_bounds_resilience() -> None:
@@ -315,9 +315,7 @@ def test_vlm_client_candidate_endpoints(monkeypatch: Any) -> None:
 
     # Test error handling when all Ollama endpoints are unreachable
     with patch("app.services.models.base._http_post_json", side_effect=ConnectionRefusedError("Connection refused")):
-        res = client.generate("Describe this satellite scene")
-        assert res.confidence > 0.0
-        assert res.params.get("mode") == "heuristic_fallback"
-        assert "Connection refused" in res.params.get("error", "")
+        with pytest.raises((RuntimeError, ConnectionRefusedError)):
+            client.generate("Describe this satellite scene")
 
 

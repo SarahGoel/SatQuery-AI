@@ -85,6 +85,7 @@ class Settings(BaseSettings):
     INFERENCE_BACKEND: str = "ollama"  # ollama | vllm
     OLLAMA_BASE_URL: str = Field(default_factory=_default_ollama_base_url)
     OLLAMA_HOST: str | None = None
+    OLLAMA_TIMEOUT: float = 180.0
     VLLM_BASE_URL: str = "http://localhost:8001"
     VLM_MODEL_NAME: str = "llava"
 

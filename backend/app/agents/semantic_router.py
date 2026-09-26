@@ -343,6 +343,12 @@ class SemanticIntentRouter:
                 result.internal_task = INTERNAL_CROSS_MODAL
                 if "OpticalSARFusionTool" not in result.tool_chain:
                     result.tool_chain.append("OpticalSARFusionTool")
+            elif (
+                any(v in query.lower() for v in ["highlight", "segment", "locate", "delineate"])
+                and not any(p in query.lower() for p in ["between two dates", "between dates", "what changed"])
+            ):
+                result.task = TASK_SINGLE_GROUNDING
+                result.internal_task = INTERNAL_SINGLE_GROUNDING
             elif task not in [TASK_BITEMPORAL_CHANGE, TASK_CROSS_MODAL]:
                 result.task = TASK_BITEMPORAL_CHANGE
                 result.internal_task = INTERNAL_BITEMPORAL_CHANGE
@@ -385,6 +391,13 @@ class SemanticIntentRouter:
         if not target_features:
             target_features = ["infrastructure"]
 
+        has_grounding_verb = any(v in q_lower for v in ["highlight", "segment", "locate", "delineate"])
+        is_explicit_bitemporal = any(p in q_lower for p in [
+            "between these two dates", "between two dates", "between the two dates", "between dates",
+            "what changed between", "what has changed between", "before and after", "before vs after",
+            "t1 vs t2", "across both dates", "two dates", "both dates", "increased, decreased, or remained unchanged"
+        ])
+
         if num_images >= 2:
             if (has_sar and has_optical) or "cross-modal" in q_lower or "sar" in q_lower:
                 return self._build_plan(
@@ -395,6 +408,17 @@ class SemanticIntentRouter:
                     tool_chain=["OpticalSARFusionTool", "GeodesicMeasurementTool", "RemoteSensingVLMClient"],
                     confidence=0.94,
                     reasoning="2 multi-sensor images (Optical + SAR) detected; routing to cross-modal fusion pipeline.",
+                )
+            if has_grounding_verb and not is_explicit_bitemporal:
+                tools = ["WaterGroundingTool" if ("water" in q_lower or "lake" in q_lower or "river" in q_lower) else "RemoteSensingVLMClient", "GeodesicMeasurementTool"]
+                return self._build_plan(
+                    task=TASK_SINGLE_GROUNDING,
+                    internal=INTERNAL_SINGLE_GROUNDING,
+                    query=query,
+                    target_features=target_features,
+                    tool_chain=tools,
+                    confidence=0.92,
+                    reasoning="Visual grounding action verb requested without temporal comparison.",
                 )
             return self._build_plan(
                 task=TASK_BITEMPORAL_CHANGE,
@@ -408,12 +432,13 @@ class SemanticIntentRouter:
 
         # 1 Image
         is_water = "water" in q_lower or "flood" in q_lower or "lake" in q_lower or "river" in q_lower
-        is_grounding = any(
-            w in q_lower
-            for w in ["ground", "highlight", "detect", "locate", "outline", "segment", "delineate", "find", "where is"]
+        is_vqa_intent = any(w in q_lower for w in ["describe", "land cover", "landcover", "land-cover", "terrain", "scene", "classes", "dominant"])
+        is_grounding = has_grounding_verb or (
+            any(w in q_lower for w in ["ground", "detect", "outline", "find", "where is", "where are", "draw a box", "bounding box"])
+            and not is_vqa_intent
         )
 
-        if is_grounding or (is_water and any(w in q_lower for w in ["mask", "boundary", "extent", "show"])):
+        if is_grounding or (has_grounding_verb and (is_water or any(w in q_lower for w in ["mask", "boundary", "extent", "polygon"]))):
             tools = ["WaterGroundingTool" if is_water else "RemoteSensingVLMClient", "GeodesicMeasurementTool"]
             return self._build_plan(
                 task=TASK_SINGLE_GROUNDING,
