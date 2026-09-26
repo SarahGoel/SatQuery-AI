@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -141,6 +142,110 @@ class GroundingService:
         )
 
     @classmethod
+    def ground_box(
+        cls,
+        image_hwc: np.ndarray,
+        box: Union[List[float], np.ndarray],
+        geotiff_path: Optional[Path] = None,
+        label: str = "Detected Object",
+        category: Optional[str] = None,
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """
+        Generate sub-pixel object segmentation mask on CPU from bounding box prompt using MobileSAM.
+        Pipes the neural mask into raster_mask_to_geojson() to produce clean WGS84 GeoJSON polygons
+        with geodesic measurements (m^2, ha, km^2).
+        Demotes OpenCV contouring (cv2.HoughCircles, Sobel filters) to a secondary fallback
+        used only if torch inference raises an unhandled exception.
+        """
+        import cv2
+
+        h, w = image_hwc.shape[:2]
+        bx = [float(v) for v in box]
+        if max(bx) <= 1.0 and any(v > 0.0 for v in bx):
+            x1, y1, x2, y2 = int(bx[0] * w), int(bx[1] * h), int(bx[2] * w), int(bx[3] * h)
+        else:
+            x1, y1, x2, y2 = int(bx[0]), int(bx[1]), int(bx[2]), int(bx[3])
+        x1 = max(0, min(x1, w - 1))
+        x2 = max(x1 + 1, min(x2, w))
+        y1 = max(0, min(y1, h - 1))
+        y2 = max(y1 + 1, min(y2, h))
+
+        # Primary: Neural MobileSAM inference on CPU
+        try:
+            from app.services.models.grounding import ZeroShotSAMGrounder
+            from app.services.geospatial.vector import raster_mask_to_geojson, convert_raster_mask_to_geojson
+
+            grounder = ZeroShotSAMGrounder()
+            neural_mask = grounder.predict_mask_from_box(image_hwc, box)
+            if not neural_mask.any():
+                raise RuntimeError("MobileSAM produced an empty mask for the given box prompt.")
+
+            if geotiff_path is not None and Path(geotiff_path).exists():
+                geojson_data = raster_mask_to_geojson(
+                    geotiff_path=Path(geotiff_path),
+                    mask=neural_mask,
+                    task_type="grounding",
+                    label=label,
+                    category=category or "infrastructure",
+                )
+            else:
+                geojson_data = convert_raster_mask_to_geojson(
+                    mask=neural_mask,
+                    transform=[1.0, 0.0, 0.0, 0.0, -1.0, float(h)],
+                    crs="EPSG:4326",
+                )
+                geojson_data.setdefault("properties", {})["task_type"] = "grounding"
+
+            return neural_mask, geojson_data
+
+        except Exception as torch_exc:
+            logger.warning(
+                "MobileSAM neural grounding exception, engaging OpenCV fallback: %s",
+                torch_exc,
+                exc_info=True,
+            )
+            # Secondary fallback: OpenCV contour heuristics (Sobel, Otsu, or Hough)
+            fallback_mask = np.zeros((h, w), dtype=np.uint8)
+            rgb_u8 = (
+                (np.clip(image_hwc, 0.0, 1.0) * 255).astype(np.uint8)
+                if image_hwc.max() <= 1.0
+                else image_hwc.astype(np.uint8)
+            )
+            gray = (
+                cv2.cvtColor(rgb_u8[..., :3], cv2.COLOR_RGB2GRAY)
+                if rgb_u8.ndim == 3 and rgb_u8.shape[-1] >= 3
+                else (rgb_u8 if rgb_u8.ndim == 2 else rgb_u8[..., 0])
+            )
+            roi = gray[y1:y2, x1:x2]
+            if roi.size > 0 and float(roi.std()) > 4.0:
+                _, binary = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                fallback_mask[y1:y2, x1:x2] = (binary > 0).astype(np.uint8)
+            else:
+                fallback_mask[y1:y2, x1:x2] = 1
+
+            if geotiff_path is not None and Path(geotiff_path).exists():
+                from app.services.geospatial.vector import raster_mask_to_geojson
+
+                geojson_data = raster_mask_to_geojson(
+                    geotiff_path=Path(geotiff_path),
+                    mask=fallback_mask,
+                    task_type="grounding",
+                    label=label,
+                    category=category or "infrastructure",
+                )
+            else:
+                from app.services.geospatial.vector import convert_raster_mask_to_geojson
+
+                geojson_data = convert_raster_mask_to_geojson(
+                    mask=fallback_mask,
+                    transform=[1.0, 0.0, 0.0, 0.0, -1.0, float(h)],
+                    crs="EPSG:4326",
+                )
+                geojson_data.setdefault("properties", {})["task_type"] = "grounding"
+
+            return fallback_mask, geojson_data
+
+    @classmethod
     def extract_grounded_instances(
         cls,
         text_query: str,
@@ -148,6 +253,7 @@ class GroundingService:
         box_threshold: float = 0.35,
         text_threshold: float = 0.30,
         nms_threshold: float = 0.45,
+        boxes: Optional[List[List[float]]] = None,
     ) -> List[Dict[str, Any]]:
         """Calibrated feature extraction pipeline.
 
@@ -157,6 +263,43 @@ class GroundingService:
         import cv2
 
         h, w = image_hwc.shape[:2]
+
+        if boxes:
+            try:
+                from app.services.models.grounding import ZeroShotSAMGrounder
+
+                grounder = ZeroShotSAMGrounder()
+                if grounder.weights_loaded:
+                    neural_candidates: List[Dict[str, Any]] = []
+                    for idx, b in enumerate(boxes, start=1):
+                        mask = grounder.predict_mask_from_box(image_hwc, b)
+                        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                        if contours:
+                            cnt = max(contours, key=cv2.contourArea)
+                            approx = cv2.approxPolyDP(cnt, epsilon=1.5, closed=True)
+                            if len(approx) >= 3:
+                                poly_pts = [[float(round(pt[0][0], 2)), float(round(pt[0][1], 2))] for pt in approx]
+                                poly_pts.append(poly_pts[0])
+                            else:
+                                poly_pts = [[b[0], b[1]], [b[2], b[1]], [b[2], b[3]], [b[0], b[3]], [b[0], b[1]]]
+                        else:
+                            poly_pts = [[b[0], b[1]], [b[2], b[1]], [b[2], b[3]], [b[0], b[3]], [b[0], b[1]]]
+                        neural_candidates.append(
+                            {
+                                "box": [float(b[0]), float(b[1]), float(b[2]), float(b[3])],
+                                "polygon": poly_pts,
+                                "confidence": 0.95,
+                                "label": f"Grounded Object {idx:02d}",
+                                "class": "infrastructure",
+                                "category": "infrastructure",
+                                "mask": mask,
+                            }
+                        )
+                    if neural_candidates:
+                        return _apply_nms(neural_candidates, iou_threshold=nms_threshold)
+            except Exception as neural_err:
+                logger.warning("MobileSAM grounding error in extract_grounded_instances, using fallback: %s", neural_err)
+
         is_tank = cls.is_industrial_target(text_query)
         is_water = cls.is_water_target(text_query)
 

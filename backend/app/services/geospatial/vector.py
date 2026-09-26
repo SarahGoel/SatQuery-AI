@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 import rasterio
@@ -387,6 +390,7 @@ def standardize_feature_collection(
                 "bbox_pixel": list(props.get("bbox_pixel") or props.get("box_px") or []),
                 "color_hint": props.get("color_hint") or color,
                 "area_m2": round(area_m2, 2),
+                "area_ha": round(area_m2 / 10000.0, 4),
                 "area_km2": round(area_km2, 6),
             }
         )
@@ -412,6 +416,8 @@ def standardize_feature_collection(
         "task_type": task,
         "summary": {
             "feature_count": len(features),
+            "total_area_m2": round(float(sum(areas_km2) * 1e6), 2),
+            "total_area_ha": round(float(sum(areas_km2) * 100.0), 4),
             "total_area_km2": round(float(sum(areas_km2)), 4),
             "mean_confidence": round(float(np.mean(confidences)) if confidences else 0.0, 4),
         },
@@ -530,20 +536,30 @@ def _to_epsg_4326(geom, src_crs) -> Any:
 
 def _geodesic_area_m2(geom_mapping: dict[str, Any] | None) -> float:
     if not geom_mapping:
+        logger.debug("Empty geometry mapping provided for geodesic area calculation, returning 0.0")
         return 0.0
     try:
         geom = shape(geom_mapping)
         if geom.is_empty:
+            logger.debug("Empty shapely geometry provided for geodesic area calculation, returning 0.0")
             return 0.0
         from pyproj import Geod
 
         geod = Geod(ellps="WGS84")
         area, _ = geod.geometry_area_perimeter(geom)
-        return abs(float(area))
-    except Exception:
+        calc_area = abs(float(area))
+        if calc_area == 0.0:
+            logger.debug("Geodesic area computed as 0.0 for geometry: %s", geom_mapping)
+        return calc_area
+    except Exception as exc:
+        logger.debug("Geodesic area calculation failed, attempting planar area fallback: %s", exc)
         try:
-            return abs(float(shape(geom_mapping).area))
-        except Exception:
+            planar_area = abs(float(shape(geom_mapping).area))
+            if planar_area == 0.0:
+                logger.debug("Planar area fallback computed as 0.0 for geometry: %s", geom_mapping)
+            return planar_area
+        except Exception as plan_exc:
+            logger.debug("Planar area fallback failed, returning 0.0: %s", plan_exc)
             return 0.0
 
 

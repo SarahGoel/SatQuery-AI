@@ -20,6 +20,15 @@ except ImportError:
 from app.core.config import settings
 from app.utils.logger import get_logger
 
+try:
+    from app.services.models.sam import build_sam_vit_t, SamPredictor, Sam
+    HAS_MOBILESAM = True
+except Exception:
+    build_sam_vit_t = None  # type: ignore[assignment]
+    SamPredictor = None  # type: ignore[assignment]
+    Sam = None  # type: ignore[assignment]
+    HAS_MOBILESAM = False
+
 logger = get_logger(__name__)
 
 
@@ -113,13 +122,90 @@ class ZeroShotSAMGrounder:
     Supports multi-instance detection, threshold tuning, and tiling inference for small objects.
     """
 
-    def __init__(self, checkpoint_path: str):
+    def __init__(self, checkpoint_path: str | Path | None = None):
         self.device = ("cuda" if torch.cuda.is_available() else "cpu") if HAS_TORCH else "cpu"
-        self.checkpoint = checkpoint_path
-        self._decoder = LightweightMaskDecoder().to(self.device)
-        self._decoder.eval()
+        self.checkpoint = str(checkpoint_path) if checkpoint_path else str(settings.resolved_mobilesam_weights())
+        self.model: Any = None
+        self.predictor: Any = None
+        self.weights_loaded: bool = False
+        self._decoder = LightweightMaskDecoder().to(self.device) if HAS_TORCH else None
         if HAS_TORCH:
-            self._try_load(Path(checkpoint_path))
+            self.load_weights(self.checkpoint)
+
+    def load_weights(self, checkpoint_path: str | Path | None = None) -> bool:
+        """
+        Load MobileSAM checkpoint into TinyViT image encoder and two-way transformer mask decoder.
+        Enforces map_location='cpu' for robust CPU inference.
+        """
+        if not HAS_TORCH or not HAS_MOBILESAM:
+            return False
+
+        target = checkpoint_path or self.checkpoint
+        candidates: List[Path] = []
+        if target:
+            target_str = str(target).replace("\\", "/")
+            candidates.append(Path(target))
+            if target_str.startswith("/"):
+                candidates.append(Path(target_str.lstrip("/")))
+            if "local_models" in target_str:
+                candidates.append(Path("local_models/sam/mobile_sam.pt"))
+                candidates.append(Path("/local_models/sam/mobile_sam.pt"))
+                candidates.append(Path("backend/local_models/sam/mobile_sam.pt"))
+
+        # Check repository root relative to current file
+        try:
+            repo_root = Path(__file__).resolve().parents[4]
+            candidates.append(repo_root / "local_models" / "sam" / "mobile_sam.pt")
+            candidates.append(repo_root / "backend" / "local_models" / "sam" / "mobile_sam.pt")
+        except Exception:
+            pass
+
+        candidates.append(Path("/local_models/sam/mobile_sam.pt"))
+        candidates.append(Path("local_models/sam/mobile_sam.pt"))
+        candidates.append(Path("../local_models/sam/mobile_sam.pt"))
+        candidates.append(Path("backend/local_models/sam/mobile_sam.pt"))
+        try:
+            candidates.append(settings.resolved_mobilesam_weights())
+        except Exception:
+            pass
+
+        resolved_path: Path | None = None
+        for cand in candidates:
+            if cand.exists() and cand.is_file():
+                resolved_path = cand
+                break
+
+        if resolved_path is None:
+            logger.warning("mobilesam_weights_missing", extra={"checked": [str(c) for c in candidates]})
+            self.weights_loaded = False
+            return False
+
+        try:
+            model = build_sam_vit_t()
+            state_dict = torch.load(resolved_path, map_location="cpu")
+            model.load_state_dict(state_dict, strict=True)
+            model.to(self.device)
+            model.eval()
+            self.model = model
+            self.predictor = SamPredictor(model)
+            self.weights_loaded = True
+            self.checkpoint = str(resolved_path)
+            logger.info("mobilesam_weights_loaded", extra={"path": str(resolved_path), "device": str(self.device)})
+            return True
+        except Exception as exc:
+            logger.warning("mobilesam_weights_load_failed", extra={"path": str(resolved_path), "error": str(exc)})
+            self.weights_loaded = False
+            if self._decoder is not None:
+                try:
+                    state = torch.load(resolved_path, map_location=self.device)
+                    if isinstance(state, dict):
+                        self._decoder.load_state_dict(state, strict=False)
+                except Exception:
+                    pass
+            return False
+
+    def _try_load(self, path: Path | str) -> bool:
+        return self.load_weights(path)
 
     def predict_instances(
         self,
@@ -236,54 +322,79 @@ class ZeroShotSAMGrounder:
         margin_h = h * (0.1 + 0.15 * (1.0 - scale))
         return [margin_w, margin_h, w - margin_w, h - margin_h]
 
-    def generate_sam_mask(self, box: List[float], image_array: np.ndarray) -> np.ndarray:
+    def predict_mask_from_box(
+        self,
+        image_hwc: np.ndarray,
+        box: Any,
+    ) -> np.ndarray:
         """
-        Leverages MobileSAM decoders to map visual boxes to high-resolution segmentation masks [55-57].
+        Accept normalized or pixel-space bounding boxes [xmin, ymin, xmax, ymax].
+        Ingest the image tensor on CPU and compute dense binary probability masks (mask > 0.0).
         """
-        if image_array.ndim == 3 and image_array.shape[0] in (1, 3) and image_array.shape[-1] not in (1, 3, 4):
-            h, w = int(image_array.shape[1]), int(image_array.shape[2])
+        if image_hwc.ndim == 3 and image_hwc.shape[0] in (1, 3) and image_hwc.shape[-1] not in (1, 3, 4):
+            h, w = int(image_hwc.shape[1]), int(image_hwc.shape[2])
         else:
-            h, w = image_array.shape[:2]
-        mask = np.zeros((h, w), dtype=np.uint8)
-        x1, y1, x2, y2 = map(int, box)
-        x1, x2 = sorted((int(np.clip(x1, 0, w)), int(np.clip(x2, 0, w))))
-        y1, y2 = sorted((int(np.clip(y1, 0, h)), int(np.clip(y2, 0, h))))
-        if x2 <= x1:
-            x2 = min(w, x1 + 1)
-        if y2 <= y1:
-            y2 = min(h, y1 + 1)
-        mask[y1:y2, x1:x2] = 1
+            h, w = image_hwc.shape[:2]
 
+        bx = [float(v) for v in box]
+        if len(bx) != 4:
+            raise ValueError(f"Expected 4 box coordinates [xmin, ymin, xmax, ymax], got {box}")
+
+        # Check if coordinates are normalized [0.0, 1.0]
+        if max(bx) <= 1.0 and any(v > 0.0 for v in bx):
+            x1 = bx[0] * w
+            y1 = bx[1] * h
+            x2 = bx[2] * w
+            y2 = bx[3] * h
+        else:
+            x1, y1, x2, y2 = bx
+
+        x1 = float(np.clip(min(x1, x2), 0, w))
+        x2 = float(np.clip(max(x1, x2), 0, w))
+        y1 = float(np.clip(min(y1, y2), 0, h))
+        y2 = float(np.clip(max(y1, y2), 0, h))
+        if x2 <= x1:
+            x2 = min(float(w), x1 + 1.0)
+        if y2 <= y1:
+            y2 = min(float(h), y1 + 1.0)
+        box_px = np.array([x1, y1, x2, y2], dtype=np.float32)
+
+        # 1. Neural MobileSAM prediction on CPU
+        if HAS_TORCH and self.predictor is not None and self.weights_loaded:
+            try:
+                rgb_u8 = _ensure_hwc_rgb_u8(image_hwc)
+                self.predictor.set_image(rgb_u8)
+                masks, _, _ = self.predictor.predict(box=box_px, multimask_output=False)
+                neural_mask = (masks[0] > 0.0).astype(np.uint8)
+                if neural_mask.any():
+                    return neural_mask
+            except Exception as exc:
+                logger.warning("mobilesam_neural_inference_failed: %s", exc)
+
+        # 2. Stand-in / box mask fallback
+        fallback_mask = np.zeros((h, w), dtype=np.uint8)
+        fallback_mask[int(y1):int(y2), int(x1):int(x2)] = 1
         if HAS_TORCH and self._decoder is not None:
             try:
-                rgb = _ensure_hwc_rgb(image_array)
-                tensor = torch.from_numpy(np.transpose(rgb, (2, 0, 1))).unsqueeze(0).float()
-                tensor = tensor.to(self.device)
+                rgb = _ensure_hwc_rgb(image_hwc)
+                tensor = torch.from_numpy(np.transpose(rgb, (2, 0, 1))).unsqueeze(0).float().to(self.device)
                 text_embed = _hash_prompt_embed("sam-box", device=torch.device(self.device))
                 with torch.no_grad():
                     refined = self._decoder(tensor, text_embed).squeeze().detach().cpu().numpy()
-                if refined.shape == mask.shape:
+                if refined.shape == fallback_mask.shape:
                     local = (refined > 0.5).astype(np.uint8)
-                    combined = mask * local
+                    combined = fallback_mask * local
                     if combined.any():
                         return combined
             except Exception:
                 pass
-        return mask
+        return fallback_mask
 
-    def _try_load(self, path: Path) -> bool:
-        if not path.exists():
-            logger.warning("grounding_weights_missing", extra={"path": str(path)})
-            return False
-        try:
-            state = torch.load(path, map_location=self.device)
-            if isinstance(state, dict):
-                self._decoder.load_state_dict(state, strict=False)
-            logger.info("grounding_weights_loaded", extra={"path": str(path)})
-            return True
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("grounding_weights_incompatible", extra={"error": str(exc)})
-            return False
+    def generate_sam_mask(self, box: List[float], image_array: np.ndarray) -> np.ndarray:
+        """
+        Leverages MobileSAM decoders to map visual boxes to high-resolution segmentation masks [55-57].
+        """
+        return self.predict_mask_from_box(image_array, box)
 
 
 @dataclass
@@ -314,7 +425,7 @@ class TextGuidedGrounder:
         """
         Execute calibrated multi-instance grounding with tiling inference and separate GeoJSON feature entries.
         """
-        from app.services.geospatial.vector import instances_to_geojson
+        from app.services.geospatial.vector import instances_to_geojson, raster_mask_to_geojson
 
         weights = (
             settings.resolved_mobilesam_weights()
@@ -362,13 +473,21 @@ class TextGuidedGrounder:
         # Convert detected instances to standards-compliant GeoJSON FeatureCollection
         detected_label = instances[0]["label"] if instances else _extract_label_from_prompt(prompt)
         detected_category = instances[0].get("category", "infrastructure") if instances else "infrastructure"
-        geojson_data = instances_to_geojson(
+        geojson_data = raster_mask_to_geojson(
             geotiff_path=image_path,
-            instances=instances,
-            default_label=detected_label,
+            mask=composite_mask,
             task_type="grounding",
+            label=detected_label,
             category=detected_category,
         )
+        if not geojson_data.get("features"):
+            geojson_data = instances_to_geojson(
+                geotiff_path=image_path,
+                instances=instances,
+                default_label=detected_label,
+                task_type="grounding",
+                category=detected_category,
+            )
 
         model_name = "mobilesam" if use_mobilesam else "sam-vit-b"
         num_found = len(instances)
@@ -397,6 +516,28 @@ class TextGuidedGrounder:
                 "boxes": [inst["box"] for inst in instances],
             },
         )
+
+
+def _ensure_hwc_rgb_u8(image_array: np.ndarray) -> np.ndarray:
+    if image_array.ndim == 2:
+        stacked = np.repeat(image_array[..., None], 3, axis=2)
+    elif image_array.shape[-1] >= 3:
+        stacked = image_array[..., :3]
+    elif image_array.shape[0] in (1, 3) and image_array.ndim == 3:
+        stacked = np.transpose(image_array[:3], (1, 2, 0))
+        if stacked.shape[-1] < 3:
+            stacked = np.repeat(stacked[..., :1], 3, axis=2)
+    else:
+        stacked = np.repeat(image_array[..., :1], 3, axis=2)
+
+    if stacked.dtype != np.uint8:
+        if float(stacked.max()) <= 1.0:
+            arr_u8 = (np.clip(stacked, 0.0, 1.0) * 255.0).astype(np.uint8)
+        else:
+            arr_u8 = np.clip(stacked, 0, 255).astype(np.uint8)
+    else:
+        arr_u8 = stacked
+    return arr_u8
 
 
 def _ensure_hwc_rgb(image_array: np.ndarray) -> np.ndarray:
