@@ -47,32 +47,56 @@ export async function prepareUploadFiles(items) {
   const files = [];
   for (const item of items) {
     if (!item) continue;
-    // Case A: Native File or Blob
+    // Priority 1: Direct native File or Blob (original unadulterated satellite raster from user's disk)
     if (item instanceof File || item instanceof Blob) {
       files.push(item);
       continue;
     }
-    // Case B: QueryComposer wrapper object containing .file
-    if (item?.file instanceof File || item?.file instanceof Blob) {
-      files.push(item.file);
+    // Priority 2: Original file object wrapped inside a QueryComposer file descriptor
+    const rawFile = item?.rawFile || item?.file;
+    if (rawFile instanceof File || rawFile instanceof Blob) {
+      files.push(rawFile);
       continue;
     }
-    // Case C: Preset chip containing relative URL in .baseImage or .resultImage
-    const candidateUrl = item?.baseImage || item?.resultImage || item?.preview;
+    // Priority 3: Clean satellite base imagery URLs (strictly exclude UI result masks, canvas screenshots, pins & overlays)
+    let candidateUrl =
+      item?.rawImage ||
+      item?.cleanImage ||
+      item?.originalImage ||
+      item?.baseImage ||
+      item?.preview;
+
+    // Sanitize any remaining resultImage references to their clean base raster counterparts
+    if (!candidateUrl && item?.resultImage) {
+      if (item.resultImage.includes("landcover-change")) {
+        candidateUrl = "/satellite/landcover-after.jpg";
+      } else if (item.resultImage.includes("water-result")) {
+        candidateUrl = "/satellite/water-sar.jpg";
+      } else if (item.resultImage.includes("flood-result")) {
+        candidateUrl = "/satellite/brahmaputra_flood.jpg";
+      } else {
+        candidateUrl = item.resultImage;
+      }
+    }
+
     if (candidateUrl && typeof candidateUrl === "string") {
       try {
         const res = await fetch(candidateUrl);
         if (res.ok) {
           const blob = await res.blob();
           const fileName = item.name || "satellite_scene.png";
-          const mime = blob.type || (fileName.endsWith(".tif") || fileName.endsWith(".tiff") ? "image/tiff" : "image/png");
+          const mime =
+            blob.type ||
+            (fileName.endsWith(".tif") || fileName.endsWith(".tiff")
+              ? "image/tiff"
+              : "image/png");
           files.push(new File([blob], fileName, { type: mime }));
           continue;
         } else {
-          console.warn(`Failed fetching preset blob at ${candidateUrl}: status ${res.status}`);
+          console.warn(`Failed fetching clean base raster at ${candidateUrl}: status ${res.status}`);
         }
       } catch (e) {
-        console.warn("Failed fetching preset blob:", e);
+        console.warn("Failed fetching clean base raster:", e);
       }
     }
   }
@@ -498,20 +522,31 @@ export default function GeospatialAnalysis() {
       setAttachedFiles(example.sampleImages.filter(Boolean));
     } else if (example.pairPreset) {
       const pair = example.pairPreset;
+      const cleanImage2 =
+        pair.file2?.baseImage ||
+        pair.cleanImage2 ||
+        (pair.id === "kerala-pair"
+          ? "/satellite/landcover-after.jpg"
+          : pair.id === "optical-sar-pair"
+          ? "/satellite/water-sar.jpg"
+          : pair.id === "flood-pair"
+          ? "/satellite/brahmaputra_flood.jpg"
+          : pair.baseImage);
+
       setAttachedFiles([
         {
           id: `${pair.id}-1`,
           name: pair.file1.name,
           size: pair.file1.size,
           modality: pair.file1.type,
-          baseImage: pair.baseImage,
+          baseImage: pair.file1?.baseImage || pair.baseImage,
         },
         {
           id: `${pair.id}-2`,
           name: pair.file2.name,
           size: pair.file2.size,
           modality: pair.file2.type,
-          baseImage: pair.resultImage,
+          baseImage: cleanImage2,
         },
       ]);
     }

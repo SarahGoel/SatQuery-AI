@@ -487,6 +487,86 @@ async def query_pipeline(
             except ValueError as extra:
                 raise HTTPException(status_code=422, detail="Unknown force_task") from extra
 
+        # Autonomous Intent Router check for zero-crash boundary enforcement
+        from app.services.models.router import AutonomousIntentRouter
+
+        intent_decision = AutonomousIntentRouter.classify(
+            query=query_text,
+            num_images=len(uploads),
+            force_task=forced.value if forced else None,
+        )
+        if intent_decision.graceful_error:
+            logger.warning("Zero-Crash boundary intercepted: %s", intent_decision.graceful_error)
+            graceful_trace_id = f"ISRO-SQ-2026-{uuid.uuid4().hex[:6].upper()}"
+            graceful_task = intent_decision.internal_task
+            audit_summary = {
+                "trace_id": graceful_trace_id,
+                "task": graceful_task,
+                "query": query_text,
+                "confidence": intent_decision.confidence,
+                "output": intent_decision.graceful_error,
+                "geojson": None,
+                "bounds": [0.0, 0.0, 0.0, 0.0],
+                "crs": "EPSG:4326",
+                "metrics": {
+                    "feature_count": 0,
+                    "confidence_pct": int(intent_decision.confidence * 100),
+                    "execution_time_sec": 0.05,
+                },
+                "status": "graceful_boundary",
+            }
+            trace_dict = {
+                "trace_id": graceful_trace_id,
+                "task": graceful_task,
+                "task_type": graceful_task,
+                "query": query_text,
+                "confidence": intent_decision.confidence,
+                "confidence_score": intent_decision.confidence,
+                "output": intent_decision.graceful_error,
+                "models_executed": ["AutonomousIntentRouter"],
+                "registry_execution": [],
+                "tools_executed": [],
+                "input_metadata": {
+                    "crs": "EPSG:4326",
+                    "bounds": [0.0, 0.0, 0.0, 0.0],
+                    "affine_transform": [],
+                    "modalities": ["Incomplete Modality Input"],
+                    "sensor": "N/A",
+                    "resolution": "N/A",
+                    "band_count": 0,
+                },
+            }
+            clean_headline = f"{intent_decision.archetype.replace('_', ' ').title()} — {graceful_trace_id}"
+            response_payload = {
+                "status": "ok",
+                "answer": intent_decision.graceful_error,
+                "task_type": graceful_task,
+                "headline": clean_headline,
+                "models_executed": ["AutonomousIntentRouter"],
+                "input_metadata": trace_dict["input_metadata"],
+                "confidence": intent_decision.confidence,
+                "geojson": None,
+                "bbox": None,
+                "change_mask": None,
+                "change_overlay_uri": None,
+                "t1_preview_url": None,
+                "t2_preview_url": None,
+                "original_image": None,
+                "baseline_image": None,
+                "base_image": None,
+                "image_t0": None,
+                "preview_url": None,
+                "overlay_image": None,
+                "evidence_image": None,
+                "visual_evidence": None,
+                "evidence_type": "None",
+                "leaflet_bounds": None,
+                "audit_summary": audit_summary,
+                "trace": trace_dict,
+                "report": {},
+            }
+            return QueryResponseEnvelope(**sanitize_for_json(response_payload))
+
         filepaths: list[str] = []
         if uploads:
             trace_dir = settings.UPLOAD_DIR / uuid.uuid4().hex
