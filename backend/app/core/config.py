@@ -71,6 +71,38 @@ def _default_ollama_base_url() -> str:
     return "http://localhost:11434"
 
 
+def _default_gemini_api_key() -> str | None:
+    key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if key:
+        return key
+    for candidate in [Path(".env"), Path("backend/.env"), Path(__file__).resolve().parents[2] / ".env"]:
+        if candidate.exists():
+            try:
+                from dotenv import dotenv_values
+                vals = dotenv_values(candidate)
+                if vals.get("GEMINI_API_KEY"):
+                    return vals["GEMINI_API_KEY"]
+            except Exception:
+                pass
+    return None
+
+
+def _default_vlm_provider() -> str:
+    prov = os.environ.get("VLM_PROVIDER")
+    if prov:
+        return prov
+    for candidate in [Path(".env"), Path("backend/.env"), Path(__file__).resolve().parents[2] / ".env"]:
+        if candidate.exists():
+            try:
+                from dotenv import dotenv_values
+                vals = dotenv_values(candidate)
+                if vals.get("VLM_PROVIDER"):
+                    return vals["VLM_PROVIDER"]
+            except Exception:
+                pass
+    return "ollama"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -81,6 +113,10 @@ class Settings(BaseSettings):
 
     SATQUERY_ENV: str = "development"
     DATABASE_URL: str = Field(default_factory=_default_database_url)
+
+    VLM_PROVIDER: str = Field(default_factory=_default_vlm_provider)  # ollama | gemini | vllm
+    GEMINI_API_KEY: str | None = Field(default_factory=_default_gemini_api_key)
+    GEMINI_MODEL: str = "gemini-3.8-flash"
 
     INFERENCE_BACKEND: str = "ollama"  # ollama | vllm
     OLLAMA_BASE_URL: str = Field(default_factory=_default_ollama_base_url)

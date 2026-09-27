@@ -13,6 +13,13 @@ try:
 except ImportError:
     httpx = None  # type: ignore[assignment]
 
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    genai = None  # type: ignore[assignment]
+    types = None  # type: ignore[assignment]
+
 from app.core.config import settings
 from app.utils.logger import get_logger
 
@@ -28,7 +35,14 @@ class VLMResult:
     params: dict[str, Any] = field(default_factory=dict)
 
 
+ISRO_EXACT_NARRATIVE_INSTRUCTION = (
+    "You are an expert ISRO Earth Observation AI. You must answer the user's query in EXACTLY 6 to 7 sentences. "
+    "Your response must be a single, cohesive paragraph written in clear, non-technical language suitable for a general audience. "
+    "Ground all spatial references using the provided metadata bounding box. Do not output raw normalized pixel coordinates."
+)
+
 REMOTE_SENSING_SYSTEM_PROMPT = (
+    f"{ISRO_EXACT_NARRATIVE_INSTRUCTION}\n\n"
     "You are an expert Earth Observation (EO), Remote Sensing, and Geospatial Intelligence AI specialist. "
     "Your task is to analyze satellite and aerial imagery—including high-to-medium resolution optical data, "
     "multi-temporal image pairs, and Synthetic Aperture Radar (SAR)—to answer analytical queries with high precision and technical rigor.\n\n"
@@ -54,6 +68,104 @@ REMOTE_SENSING_SYSTEM_PROMPT = (
 )
 
 PLAIN_LANGUAGE_SYSTEM = REMOTE_SENSING_SYSTEM_PROMPT
+
+
+def get_effective_system_prompt(custom_prompt: str | None = None) -> str:
+    """Ensures ISRO_EXACT_NARRATIVE_INSTRUCTION is enforced at the top of any system prompt."""
+    base = (custom_prompt or "").strip()
+    if ISRO_EXACT_NARRATIVE_INSTRUCTION not in base:
+        if base:
+            return f"{ISRO_EXACT_NARRATIVE_INSTRUCTION}\n\n{base}"
+        return REMOTE_SENSING_SYSTEM_PROMPT
+def extract_spatial_context(
+    extra: dict[str, Any] | None = None,
+    image_path: Path | str | None = None,
+    images: list[Any] | None = None,
+) -> tuple[dict[str, Any], str]:
+    """Extracts geographic extent and center coordinates from metadata or raster bounds.
+    
+    Returns:
+        (meta_dict, spatial_context_string)
+    """
+    extra = extra or {}
+    meta = dict(
+        extra.get("metadata")
+        or extra.get("primary_meta")
+        or extra.get("meta")
+        or {}
+    )
+
+    bbox = meta.get("bbox") or meta.get("bounds") or extra.get("bbox") or extra.get("bounds")
+
+    if not bbox and image_path:
+        p = Path(image_path)
+        if p.exists() and p.suffix.lower() in (".tif", ".tiff"):
+            try:
+                import rasterio
+                with rasterio.open(p) as src:
+                    b = src.bounds
+                    bbox = [float(b.left), float(b.bottom), float(b.right), float(b.top)]
+            except Exception:
+                pass
+
+    if not bbox and images:
+        for im in images:
+            if isinstance(im, (str, Path)):
+                p = Path(im)
+                if p.exists() and p.suffix.lower() in (".tif", ".tiff"):
+                    try:
+                        import rasterio
+                        with rasterio.open(p) as src:
+                            b = src.bounds
+                            bbox = [float(b.left), float(b.bottom), float(b.right), float(b.top)]
+                            break
+                    except Exception:
+                        pass
+
+    if bbox and isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+        if any(float(v) != 0 for v in bbox[:4]):
+            min_lon, min_lat, max_lon, max_lat = [float(v) for v in bbox[:4]]
+            meta["bbox"] = f"{min_lon:.4f}, {min_lat:.4f}, {max_lon:.4f}, {max_lat:.4f}"
+            if not meta.get("center") or meta.get("center") == "Unknown":
+                center_lon = (min_lon + max_lon) / 2.0
+                center_lat = (min_lat + max_lat) / 2.0
+                meta["center"] = f"{center_lat:.4f}°N, {center_lon:.4f}°E"
+        else:
+            meta.setdefault("bbox", "Global")
+            meta.setdefault("center", "Unknown")
+    else:
+        if not meta.get("bbox"):
+            meta["bbox"] = "Global"
+        if not meta.get("center"):
+            meta["center"] = "Unknown"
+
+    spatial_context = (
+        f"Geographic Extent: Bounding Box [{meta.get('bbox', 'Global')}], "
+        f"Center: [{meta.get('center', 'Unknown')}]."
+    )
+    return meta, spatial_context
+
+
+def build_domain_grounded_prompt(
+    system_instruction: str,
+    user_query: str,
+    meta: dict[str, Any] | None = None,
+) -> str:
+    """Injects geospatial context and domain directives into the prompt."""
+    meta = meta or {}
+    spatial_context = (
+        f"Geographic Extent: Bounding Box [{meta.get('bbox', 'Global')}], "
+        f"Center: [{meta.get('center', 'Unknown')}]."
+    )
+    return (
+        f"{system_instruction}\n"
+        f"{spatial_context}\n"
+        f"User Query: {user_query}\n"
+        f"Domain Directives:\n"
+        f"- Accurately identify biomes and land-cover: distinguish irrigated agricultural cropland from dense forest.\n"
+        f"- Never categorize water bodies as built-up infrastructure.\n"
+        f"- Reference major geographic features (seas, deltas, coastlines, deserts) consistent with the coordinates."
+    )
 
 
 def _http_post_json(
@@ -315,13 +427,128 @@ class LocalVisionLanguageClient:
 
         effective_prompt = prompt
 
-        try:
-            if self.backend == "vllm":
+        vlm_provider = (
+            os.environ.get("VLM_PROVIDER")
+            or getattr(settings, "VLM_PROVIDER", None)
+            or self.backend
+            or "ollama"
+        ).lower()
+        api_key = settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+
+        # 1. Dual-Engine Gemini inference branch
+        if (vlm_provider == "gemini" or self.backend == "gemini") and api_key:
+            try:
+                return self._gemini(effective_prompt, primary_path, payload_note, images=images)
+            except Exception as gemini_err:
+                logger.warning("Gemini VLM inference failed (%s); falling back to Ollama pipeline", gemini_err)
+
+        # 2. vLLM backend branch
+        if self.backend == "vllm" or vlm_provider == "vllm":
+            try:
                 return self._vllm(effective_prompt, primary_path, payload_note, images=images)
+            except Exception as vllm_err:
+                logger.warning("vLLM inference failed (%s); falling back to Ollama pipeline", vllm_err)
+
+        # 3. Ollama fallback / primary on-premise execution block
+        try:
             return self._ollama(effective_prompt, primary_path, payload_note, images=images)
         except Exception as exc:
             logger.error("VLM service inference failed: %s", exc, exc_info=True)
             raise
+
+    def generate_visual_narrative(
+        self,
+        prompt: str,
+        image_path: Path | str | None = None,
+        images: list[Path | str | bytes] | None = None,
+        extra_context: dict[str, Any] | None = None,
+    ) -> VLMResult:
+        """Visual narrative generation alias."""
+        return self.generate(prompt=prompt, image_path=image_path, images=images, extra_context=extra_context)
+
+    def _gemini(
+        self,
+        prompt: str,
+        image_path: Path | str | None,
+        extra: dict[str, Any],
+        images: list[Path | str | bytes] | None = None,
+    ) -> VLMResult:
+        if genai is None or types is None:
+            raise RuntimeError("google-genai SDK is not installed")
+
+        api_key = settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY is not configured")
+
+        client = genai.Client(api_key=api_key)
+        model_name = getattr(settings, "GEMINI_MODEL", "gemini-3.8-flash") or "gemini-3.8-flash"
+
+        raw_candidates: list[Any] = []
+        if images:
+            raw_candidates.extend(images)
+        if image_path is not None:
+            raw_candidates.append(image_path)
+        if extra and extra.get("images"):
+            raw_candidates.extend(extra.get("images"))
+        if extra and extra.get("filepaths") and not raw_candidates:
+            raw_candidates.extend(extra.get("filepaths"))
+
+        parts: list[Any] = []
+        for cand in raw_candidates:
+            b64_str = _b64(cand)
+            if b64_str:
+                img_bytes = base64.b64decode(b64_str)
+                parts.append(types.Part.from_bytes(data=img_bytes, mime_type="image/png"))
+
+        logger.info(
+            "Gemini payload prepared: prompt_len=%d, images_count=%d, model=%s",
+            len(prompt),
+            len(parts),
+            model_name,
+        )
+
+        meta_dict, spatial_context = extract_spatial_context(extra, image_path, images)
+        system_instruction = get_effective_system_prompt(extra.get("system_prompt"))
+
+        if "Domain Directives:" not in prompt and "Geographic Extent:" not in prompt:
+            enhanced_prompt = build_domain_grounded_prompt(
+                system_instruction=system_instruction,
+                user_query=prompt,
+                meta=meta_dict,
+            )
+        else:
+            enhanced_prompt = prompt
+
+        contents: list[Any] = [enhanced_prompt] + parts
+
+        config = types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            temperature=0.2,
+        )
+
+        response = client.models.generate_content(
+            model=model_name,
+            contents=contents,
+            config=config,
+        )
+
+        text = response.text or ""
+        if not text.strip():
+            raise ValueError("Gemini returned an empty text response")
+
+        return VLMResult(
+            text=text.strip(),
+            confidence=0.96,
+            params={
+                "backend": "gemini",
+                "model": model_name,
+                "provider": "gemini",
+                "spatial_context": spatial_context,
+                "bbox": meta_dict.get("bbox"),
+                "center": meta_dict.get("center"),
+                **extra,
+            },
+        )
 
     def _ollama(
         self,
@@ -365,14 +592,25 @@ class LocalVisionLanguageClient:
         if "llava" not in self.model.lower():
             models_to_try.append("llava")
 
+        meta_dict, spatial_context = extract_spatial_context(extra, image_path, images)
+        effective_sys = get_effective_system_prompt(extra.get("system_prompt"))
+        if "Domain Directives:" not in prompt and "Geographic Extent:" not in prompt:
+            effective_prompt = build_domain_grounded_prompt(
+                system_instruction=effective_sys,
+                user_query=prompt,
+                meta=meta_dict,
+            )
+        else:
+            effective_prompt = prompt
+
         last_err: Exception | None = None
         for base_url in unique_urls:
             url = f"{base_url.rstrip('/')}/api/generate"
             for model_name in models_to_try:
                 body: dict[str, Any] = {
                     "model": model_name,
-                    "prompt": prompt,
-                    "system": PLAIN_LANGUAGE_SYSTEM,
+                    "prompt": effective_prompt,
+                    "system": effective_sys,
                     "stream": False,
                     "keep_alive": "10m",
                 }
@@ -387,7 +625,15 @@ class LocalVisionLanguageClient:
                         return VLMResult(
                             text=text.strip(),
                             confidence=0.88,
-                            params={"backend": "ollama", "model": model_name, "endpoint": base_url, **extra},
+                            params={
+                                "backend": "ollama",
+                                "model": model_name,
+                                "endpoint": base_url,
+                                "spatial_context": spatial_context,
+                                "bbox": meta_dict.get("bbox"),
+                                "center": meta_dict.get("center"),
+                                **extra,
+                            },
                         )
                 except Exception as err:
                     last_err = err
@@ -405,7 +651,18 @@ class LocalVisionLanguageClient:
         extra: dict[str, Any],
         images: list[Path | str | bytes] | None = None,
     ) -> VLMResult:
-        content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        meta_dict, spatial_context = extract_spatial_context(extra, image_path, images)
+        effective_sys = get_effective_system_prompt(extra.get("system_prompt"))
+        if "Domain Directives:" not in prompt and "Geographic Extent:" not in prompt:
+            effective_prompt = build_domain_grounded_prompt(
+                system_instruction=effective_sys,
+                user_query=prompt,
+                meta=meta_dict,
+            )
+        else:
+            effective_prompt = prompt
+
+        content: list[dict[str, Any]] = [{"type": "text", "text": effective_prompt}]
         raw_candidates: list[Any] = []
         if images:
             raw_candidates.extend(images)
@@ -429,7 +686,7 @@ class LocalVisionLanguageClient:
         body = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": PLAIN_LANGUAGE_SYSTEM},
+                {"role": "system", "content": effective_sys},
                 {"role": "user", "content": content},
             ],
             "max_tokens": 512,

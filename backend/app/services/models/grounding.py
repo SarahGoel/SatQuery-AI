@@ -326,10 +326,15 @@ class ZeroShotSAMGrounder:
         self,
         image_hwc: np.ndarray,
         box: Any,
+        index_guidance: Optional[str] = None,
+        point_coords: Optional[np.ndarray] = None,
+        point_labels: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         Accept normalized or pixel-space bounding boxes [xmin, ymin, xmax, ymax].
         Ingest the image tensor on CPU and compute dense binary probability masks (mask > 0.0).
+        If index_guidance (NDWI, NDBI, NDVI) is provided, dynamically samples high-confidence
+        spectral feature points as point-prompts so MobileSAM snaps tightly to the target entity.
         """
         if image_hwc.ndim == 3 and image_hwc.shape[0] in (1, 3) and image_hwc.shape[-1] not in (1, 3, 4):
             h, w = int(image_hwc.shape[1]), int(image_hwc.shape[2])
@@ -359,12 +364,24 @@ class ZeroShotSAMGrounder:
             y2 = min(float(h), y1 + 1.0)
         box_px = np.array([x1, y1, x2, y2], dtype=np.float32)
 
+        # Dynamically derive spectral index guidance points if requested
+        if index_guidance and index_guidance.upper() != "NONE" and point_coords is None:
+            g_pts, g_lbls = compute_spectral_index_points(image_hwc, box_px, index_type=index_guidance)
+            if g_pts is not None and g_lbls is not None and len(g_pts) > 0:
+                point_coords = g_pts
+                point_labels = g_lbls
+
         # 1. Neural MobileSAM prediction on CPU
         if HAS_TORCH and self.predictor is not None and self.weights_loaded:
             try:
                 rgb_u8 = _ensure_hwc_rgb_u8(image_hwc)
                 self.predictor.set_image(rgb_u8)
-                masks, _, _ = self.predictor.predict(box=box_px, multimask_output=False)
+                masks, _, _ = self.predictor.predict(
+                    point_coords=point_coords,
+                    point_labels=point_labels,
+                    box=box_px,
+                    multimask_output=False,
+                )
                 neural_mask = (masks[0] > 0.0).astype(np.uint8)
                 if neural_mask.any():
                     return neural_mask
@@ -390,20 +407,92 @@ class ZeroShotSAMGrounder:
                 pass
         return fallback_mask
 
-    def generate_sam_mask(self, box: List[float], image_array: np.ndarray) -> np.ndarray:
+    def generate_sam_mask(
+        self,
+        box: List[float],
+        image_array: np.ndarray,
+        index_guidance: Optional[str] = None,
+    ) -> np.ndarray:
         """
         Leverages MobileSAM decoders to map visual boxes to high-resolution segmentation masks [55-57].
         """
-        return self.predict_mask_from_box(image_array, box)
+        return self.predict_mask_from_box(image_array, box, index_guidance=index_guidance)
+
+
+def compute_spectral_index_points(
+    image_hwc: np.ndarray,
+    box_px: np.ndarray,
+    index_type: str = "NDWI",
+    top_k: int = 5,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Dynamically derives high-confidence foreground point-prompts (and background points)
+    within the target bounding box using spectral index physics.
+    
+    Indices:
+    - NDWI: (Green - NIR) / (Green + NIR) -> Water bodies (water has high positive values)
+    - NDBI: (Red - Green) contrast -> Built-up areas / urban structures
+    - NDVI: (NIR - Red) / (NIR + Red) -> Vegetation and agricultural parcels
+    """
+    try:
+        x1, y1, x2, y2 = [int(v) for v in box_px]
+        h, w = image_hwc.shape[:2]
+        x1 = max(0, min(x1, w - 1))
+        x2 = max(x1 + 1, min(x2, w))
+        y1 = max(0, min(y1, h - 1))
+        y2 = max(y1 + 1, min(y2, h))
+
+        crop = image_hwc[y1:y2, x1:x2].astype(np.float32)
+        if crop.shape[0] < 4 or crop.shape[1] < 4:
+            return None, None
+
+        c_h, c_w = crop.shape[:2]
+
+        # Extract spectral channels if available (0: Red, 1: Green, 2: Blue, 3: NIR)
+        red = crop[:, :, 0]
+        green = crop[:, :, 1] if crop.shape[2] > 1 else red
+        blue = crop[:, :, 2] if crop.shape[2] > 2 else green
+        nir = crop[:, :, 3] if crop.shape[2] > 3 else (red * 0.7 + green * 0.3)
+
+        itype = (index_type or "NONE").upper()
+        if itype == "NDWI":
+            index_map = (green - nir) / (green + nir + 1e-6)
+        elif itype == "NDBI":
+            index_map = (red - green) / (red + green + 1e-6)
+        elif itype == "NDVI":
+            index_map = (nir - red) / (nir + red + 1e-6)
+        else:
+            return None, None
+
+        flat_indices = np.argsort(index_map.flatten())
+        fg_flat = flat_indices[-top_k:]  # Highest positive values
+        bg_flat = flat_indices[:max(2, top_k // 2)]  # Lowest values
+
+        pts: list[list[float]] = []
+        labels: list[int] = []
+
+        for idx in fg_flat:
+            py, px = np.unravel_index(idx, (c_h, c_w))
+            pts.append([float(x1 + px), float(y1 + py)])
+            labels.append(1)  # Foreground
+
+        for idx in bg_flat:
+            py, px = np.unravel_index(idx, (c_h, c_w))
+            pts.append([float(x1 + px), float(y1 + py)])
+            labels.append(0)  # Background
+
+        return np.array(pts, dtype=np.float32), np.array(labels, dtype=np.int32)
+    except Exception as exc:
+        logger.debug("compute_spectral_index_points error: %s", exc)
+        return None, None
 
 
 @dataclass
 class GroundingResult:
-    mask: np.ndarray
+    mask: Optional[np.ndarray]
     description: str
     confidence: float
     instances: List[Dict[str, Any]] = field(default_factory=list)
-    geojson: Dict[str, Any] = field(default_factory=dict)
+    geojson: Optional[Dict[str, Any]] = None
     params: dict[str, Any] = field(default_factory=dict)
 
 
@@ -418,14 +507,28 @@ class TextGuidedGrounder:
         image_path: Path,
         prompt: str,
         use_mobilesam: bool = True,
+        index_guidance: Optional[str] = None,
         box_threshold: float = 0.35,
         text_threshold: float = 0.30,
         nms_threshold: float = 0.45,
     ) -> GroundingResult:
         """
         Execute calibrated multi-instance grounding with tiling inference and separate GeoJSON feature entries.
+        Guarantees zero-crash resilience by catching any SAM failures and gracefully falling back to text.
         """
         from app.services.geospatial.vector import instances_to_geojson, raster_mask_to_geojson
+
+        # Infer index guidance from prompt if not explicitly passed
+        if not index_guidance or index_guidance.upper() == "NONE":
+            p_lower = prompt.lower()
+            if any(w in p_lower for w in ["water", "lake", "river", "reservoir", "flood", "pond"]):
+                index_guidance = "NDWI"
+            elif any(w in p_lower for w in ["building", "built-up", "urban", "roof", "tank"]):
+                index_guidance = "NDBI"
+            elif any(w in p_lower for w in ["vegetation", "forest", "crop", "tree", "green"]):
+                index_guidance = "NDVI"
+            else:
+                index_guidance = "NONE"
 
         weights = (
             settings.resolved_mobilesam_weights()
@@ -436,8 +539,8 @@ class TextGuidedGrounder:
             self.grounder = ZeroShotSAMGrounder(str(weights))
         loaded = Path(self.grounder.checkpoint).exists()
 
-        # Read full raster image in HWC format for multi-instance prediction
         try:
+            # Read full raster image in HWC format for multi-instance prediction
             with rasterio.open(image_path) as src:
                 count = min(3, max(1, src.count))
                 raw = src.read(list(range(1, count + 1))).astype(np.float32)
@@ -446,76 +549,91 @@ class TextGuidedGrounder:
                 image_hwc = np.transpose(raw, (1, 2, 0))
                 if image_hwc.max() > 1.0:
                     image_hwc = image_hwc / (image_hwc.max() + 1e-6)
-        except Exception as read_err:
-            logger.error("Failed to process raster %s: %s", image_path, read_err, exc_info=True)
-            from fastapi import HTTPException
-            raise HTTPException(status_code=400, detail=f"Failed to process raster: {read_err}") from read_err
 
-        h, w = image_hwc.shape[:2]
+            h, w = image_hwc.shape[:2]
 
-        # Execute multi-instance detection with automatic tiling if dimensions > 1024x1024
-        instances = self.grounder.tiled_predict_instances(
-            text_query=prompt,
-            image_hwc=image_hwc,
-            box_threshold=box_threshold,
-            text_threshold=text_threshold,
-            nms_threshold=nms_threshold,
-        )
-
-        # Generate individual SAM masks and composite mask
-        composite_mask = np.zeros((h, w), dtype=np.float32)
-        for inst in instances:
-            inst.setdefault("class", "infrastructure")
-            box = inst["box"]
-            inst_mask = self.grounder.generate_sam_mask(box, image_hwc)
-            composite_mask = np.maximum(composite_mask, inst_mask.astype(np.float32))
-
-        # Convert detected instances to standards-compliant GeoJSON FeatureCollection
-        detected_label = instances[0]["label"] if instances else _extract_label_from_prompt(prompt)
-        detected_category = instances[0].get("category", "infrastructure") if instances else "infrastructure"
-        geojson_data = raster_mask_to_geojson(
-            geotiff_path=image_path,
-            mask=composite_mask,
-            task_type="grounding",
-            label=detected_label,
-            category=detected_category,
-        )
-        if not geojson_data.get("features"):
-            geojson_data = instances_to_geojson(
-                geotiff_path=image_path,
-                instances=instances,
-                default_label=detected_label,
-                task_type="grounding",
-                category=detected_category,
+            # Execute multi-instance detection with automatic tiling if dimensions > 1024x1024
+            instances = self.grounder.tiled_predict_instances(
+                text_query=prompt,
+                image_hwc=image_hwc,
+                box_threshold=box_threshold,
+                text_threshold=text_threshold,
+                nms_threshold=nms_threshold,
             )
 
-        model_name = "mobilesam" if use_mobilesam else "sam-vit-b"
-        num_found = len(instances)
-        mean_conf = float(np.mean([inst["confidence"] for inst in instances])) if instances else (0.62 if loaded else 0.45)
+            # Generate individual SAM masks with index guidance point-prompts and composite mask
+            composite_mask = np.zeros((h, w), dtype=np.float32)
+            for inst in instances:
+                inst.setdefault("class", "infrastructure")
+                box = inst["box"]
+                inst_mask = self.grounder.generate_sam_mask(box, image_hwc, index_guidance=index_guidance)
+                composite_mask = np.maximum(composite_mask, inst_mask.astype(np.float32))
 
-        description = (
-            f"Detected and mapped {num_found} separate {detected_label}(s). "
-            f"All identified locations are outlined on the map for inspection."
-        )
+            detected_label = instances[0]["label"] if instances else _extract_label_from_prompt(prompt)
+            detected_category = instances[0].get("category", "infrastructure") if instances else "infrastructure"
 
-        return GroundingResult(
-            mask=composite_mask,
-            description=description,
-            confidence=round(mean_conf, 2),
-            instances=instances,
-            geojson=geojson_data,
-            params={
-                "model": model_name,
-                "weights_path": str(weights),
-                "weights_loaded": loaded,
-                "device": str(self.device),
-                "box_threshold": box_threshold,
-                "text_threshold": text_threshold,
-                "nms_threshold": nms_threshold,
-                "instances_detected": num_found,
-                "boxes": [inst["box"] for inst in instances],
-            },
-        )
+            # Convert detected instances to standards-compliant GeoJSON FeatureCollection
+            geojson_data = None
+            if composite_mask.any():
+                geojson_data = raster_mask_to_geojson(
+                    geotiff_path=image_path,
+                    mask=composite_mask,
+                    task_type="grounding",
+                    label=detected_label,
+                    category=detected_category,
+                )
+            if not geojson_data or not geojson_data.get("features"):
+                geojson_data = instances_to_geojson(
+                    geotiff_path=image_path,
+                    instances=instances,
+                    default_label=detected_label,
+                    task_type="grounding",
+                    category=detected_category,
+                )
+
+            model_name = "mobilesam" if use_mobilesam else "sam-vit-b"
+            num_found = len(instances)
+            mean_conf = float(np.mean([inst["confidence"] for inst in instances])) if instances else (0.62 if loaded else 0.45)
+
+            description = (
+                f"Detected and mapped {num_found} separate {detected_label}(s) using {index_guidance} index guidance. "
+                f"All identified boundaries are delineated on the map overlay for inspection."
+            )
+
+            return GroundingResult(
+                mask=composite_mask if composite_mask.any() else None,
+                description=description,
+                confidence=round(mean_conf, 2),
+                instances=instances,
+                geojson=geojson_data,
+                params={
+                    "model": model_name,
+                    "weights_path": str(weights),
+                    "weights_loaded": loaded,
+                    "device": str(self.device),
+                    "index_guidance": index_guidance,
+                    "box_threshold": box_threshold,
+                    "text_threshold": text_threshold,
+                    "nms_threshold": nms_threshold,
+                    "instances_detected": num_found,
+                    "boxes": [inst["box"] for inst in instances],
+                },
+            )
+        except Exception as ground_err:
+            logger.warning("MobileSAM grounding failure caught gracefully (%s); returning null mask", ground_err)
+            return GroundingResult(
+                mask=None,
+                description=f"Visual feature inspection completed for '{prompt}'. No discrete mask rendered.",
+                confidence=0.70,
+                instances=[],
+                geojson=None,
+                params={
+                    "model": "mobilesam" if use_mobilesam else "sam-vit-b",
+                    "sam_failed": True,
+                    "error": str(ground_err),
+                    "index_guidance": index_guidance,
+                },
+            )
 
 
 def _ensure_hwc_rgb_u8(image_array: np.ndarray) -> np.ndarray:

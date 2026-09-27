@@ -102,6 +102,7 @@ export default function QueryComposer({
         modality: f.name.endsWith(".tif") || f.name.endsWith(".tiff") ? "GeoTIFF Satellite" : "Optical Imagery",
         baseImage: f.type.startsWith("image/") ? URL.createObjectURL(f) : "/satellite/water-optical.jpg",
         file: f,
+        rawFile: f,
       }));
       onAddFiles(formatted);
     }
@@ -121,8 +122,9 @@ export default function QueryComposer({
           ? URL.createObjectURL(f)
           : i === 0
           ? "/satellite/landcover-before.jpg"
-          : "/satellite/landcover-change.jpg",
+          : "/satellite/landcover-after.jpg",
         file: f,
+        rawFile: f,
       }));
       onAddFiles(formatted);
     }
@@ -136,20 +138,31 @@ export default function QueryComposer({
   };
 
   const handleSelectPairPreset = (pair) => {
+    const cleanImage2 =
+      pair.file2?.baseImage ||
+      pair.cleanImage2 ||
+      (pair.id === "kerala-pair"
+        ? "/satellite/landcover-after.jpg"
+        : pair.id === "optical-sar-pair"
+        ? "/satellite/water-sar.jpg"
+        : pair.id === "flood-pair"
+        ? "/satellite/brahmaputra_flood.jpg"
+        : pair.baseImage);
+
     onAddFiles([
       {
         id: `${pair.id}-1`,
         name: pair.file1.name,
         size: pair.file1.size,
         modality: pair.file1.type,
-        baseImage: pair.baseImage,
+        baseImage: pair.file1?.baseImage || pair.baseImage,
       },
       {
         id: `${pair.id}-2`,
         name: pair.file2.name,
         size: pair.file2.size,
         modality: pair.file2.type,
-        baseImage: pair.resultImage,
+        baseImage: cleanImage2,
       },
     ]);
     if (!query.trim() && pair.defaultQuery) {

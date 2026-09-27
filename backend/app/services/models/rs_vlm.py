@@ -12,11 +12,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.core.config import settings
-from app.services.models.base import LocalVisionLanguageClient, VLMResult
+from app.services.models.base import (
+    ISRO_EXACT_NARRATIVE_INSTRUCTION,
+    LocalVisionLanguageClient,
+    VLMResult,
+)
 
 logger = logging.getLogger("RemoteSensingVLMClient")
 
 GEOCHAT_SYSTEM_PROMPT = (
+    f"{ISRO_EXACT_NARRATIVE_INSTRUCTION}\n\n"
     "You are GeoChat-RS, a specialized Earth Observation and Remote Sensing Vision-Language Model. "
     "You possess deep domain expertise in analyzing satellite, aerial, multi-spectral, and SAR radar imagery. "
     "You are strictly location-agnostic and analyze visual evidence dynamically for any region worldwide. "
@@ -26,16 +31,17 @@ GEOCHAT_SYSTEM_PROMPT = (
     "3. Land Cover & Terrain: Recognize and differentiate between built-up infrastructure, crop fields, dense forest, bare soil, and open water bodies.\n"
     "4. Object & Feature Grounding: When asked to locate or identify specific targets (storage tanks, aircraft, bridges, runways, rooftops), describe their spatial orientation and approximate bounding regions.\n"
     "5. Multi-Sensor Physics: Understand that SAR backscatter is dark on smooth specular water (< -18 dB) and very bright on double-bounce vertical structures.\n"
-    "6. Output Style: Plain, authoritative, non-technical language. Retain quantitative counts and percentages, but avoid neural network jargon."
+    "6. Output Style: Plain, authoritative, non-technical language in exactly 6 to 7 sentences in a cohesive paragraph. Retain quantitative counts and percentages, but avoid neural network jargon."
 )
 
 TEMPORAL_VLM_SYSTEM_PROMPT = (
+    f"{ISRO_EXACT_NARRATIVE_INSTRUCTION}\n\n"
     "You are an expert remote sensing analyst explaining satellite imagery to a non-technical user. "
     "You are completely location-agnostic and analyze satellite visual evidence dynamically for any region worldwide. "
     "Your task is to directly and specifically answer the user's query based strictly on the visual evidence in the imagery, "
     "identifying and describing any geographical features, landforms, or water bodies mentioned in the user's query. "
     "Never hardcode or assume specific unverified geographic locations (such as 'Aral Sea') unless explicitly stated in the query. "
-    "Write a clear, conversational, descriptive 5-6 sentence paragraph explaining exactly what changed visually between the two dates "
+    "Write a clear, conversational, descriptive 6 to 7 sentence cohesive paragraph explaining exactly what changed visually between the two dates "
     "(e.g., receding water, expanding landmass, joining islands, or urban development). "
     "Do not use overly technical jargon. Be conversational, descriptive, and clear."
 )
@@ -58,25 +64,44 @@ class RemoteSensingVLMClient:
         system_prompt: Optional[str] = None,
         timeout: float = 180.0,
     ) -> None:
-        self.backend = backend or os.environ.get("INFERENCE_BACKEND", "ollama")
+        provider = (
+            backend
+            or os.environ.get("VLM_PROVIDER")
+            or getattr(settings, "VLM_PROVIDER", None)
+            or os.environ.get("INFERENCE_BACKEND", "ollama")
+        ).lower()
+        api_key = (
+            os.environ.get("GEMINI_API_KEY")
+            or getattr(settings, "GEMINI_API_KEY", None)
+            or os.environ.get("GOOGLE_API_KEY")
+        )
+
+        if provider == "gemini" and api_key:
+            self.backend = "gemini"
+            self.model_name = getattr(settings, "GEMINI_MODEL", "gemini-3.8-flash") or "gemini-3.8-flash"
+            self.model = self.model_name
+        else:
+            self.backend = (backend or os.environ.get("INFERENCE_BACKEND", "ollama")).lower()
+            # Resolve model checkpoint
+            resolved_model = model or os.environ.get("RS_VLM_MODEL")
+            if not resolved_model:
+                # Check local models directory for GeoChat/RS weights
+                models_dir = Path(settings.LOCAL_MODELS_DIR)
+                found_local = None
+                if models_dir.exists():
+                    for rs_name in self.PREFERRED_RS_MODELS:
+                        p = models_dir / rs_name
+                        if p.exists():
+                            found_local = str(p)
+                            break
+                resolved_model = found_local or os.environ.get("VLM_MODEL", "llava")
+
+            self.model = resolved_model
+            self.model_name = self.model
+
         self.system_prompt = system_prompt or GEOCHAT_SYSTEM_PROMPT
         self.timeout = timeout
 
-        # Resolve model checkpoint
-        resolved_model = model or os.environ.get("RS_VLM_MODEL")
-        if not resolved_model:
-            # Check local models directory for GeoChat/RS weights
-            models_dir = Path(settings.LOCAL_MODELS_DIR)
-            found_local = None
-            if models_dir.exists():
-                for rs_name in self.PREFERRED_RS_MODELS:
-                    p = models_dir / rs_name
-                    if p.exists():
-                        found_local = str(p)
-                        break
-            resolved_model = found_local or os.environ.get("VLM_MODEL", "llava")
-
-        self.model = resolved_model
         self.client = LocalVisionLanguageClient()
         if self.backend:
             self.client.backend = self.backend.lower()
@@ -383,6 +408,9 @@ class RemoteSensingVLMClient:
             )
             # Enhance confidence and adapter provenance for domain RS pipeline
             res.params["domain_adapter"] = "GeoChat-RS"
+            if res.params.get("backend") == "gemini" or self.backend == "gemini":
+                res.params["backend"] = "gemini"
+                res.params["model"] = getattr(self, "model_name", "gemini-3.8-flash")
             res.params["lora_loaded"] = self.lora_loaded
             res.params["lora_adapter"] = self.lora_adapter_name if self.lora_loaded else None
             res.params["vlm_lora_detected"] = self.vlm_lora_detected
@@ -422,6 +450,21 @@ class RemoteSensingVLMClient:
             extra_context=extra_context,
         )
 
+    def generate_visual_narrative(
+        self,
+        prompt: str,
+        images: list[Path | str | bytes] | None = None,
+        image_path: Path | str | None = None,
+        extra_context: dict[str, Any] | None = None,
+    ) -> VLMResult:
+        """Visual narrative generation alias."""
+        return self.generate_vqa(
+            prompt=prompt,
+            images=images,
+            image_path=image_path,
+            extra_context=extra_context,
+        )
+
     def generate_vqa(
         self,
         prompt: str,
@@ -446,6 +489,8 @@ class RemoteSensingVLMClient:
             text = re.sub(r"^\[Surface Land Cover Context:[^\]]*\]\s*", "", text, flags=re.IGNORECASE)
             text = re.sub(r"^User (?:Target )?(?:Query|Question):\s*\"[^\"]+\"\s*", "", text, flags=re.IGNORECASE)
             text = re.sub(r"^User (?:Target )?(?:Query|Question):\s*[^\n\r]+\s*", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"^Geographic Extent:.*?\n+", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"^Domain Directives:.*?\n+", "", text, flags=re.IGNORECASE)
             text = re.sub(r"^Analyze this remote sensing scene.*?\n\n", "", text, flags=re.IGNORECASE | re.DOTALL)
             text = re.sub(r"^Analyze the satellite imagery carefully.*?\n\n", "", text, flags=re.IGNORECASE | re.DOTALL)
             text = re.sub(r"^You are an expert remote sensing.*?\n\n", "", text, flags=re.IGNORECASE | re.DOTALL)
@@ -525,7 +570,7 @@ class RemoteSensingVLMClient:
             f"3. Identify and address any geographical features, landforms, or water bodies referenced in the user's query.\n"
             f"4. Do NOT assume, mention, or hardcode any specific geographic location names (such as 'Aral Sea' or unconfirmed regional landmarks) unless explicitly named by the user in their query.\n"
             f"5. If the query asks about a trend, change, increase, decrease, or whether features changed or remained unchanged, you MUST begin your evaluation with: Assessment: [Increased | Decreased | Unchanged] — followed by your clear non-technical explanation.\n"
-            f"6. Write a clear, conversational, descriptive 5-6 sentence paragraph explaining exactly what changed visually between the two dates (T1 and T2)."
+            f"6. Write a clear, conversational, descriptive 6 to 7 sentence cohesive paragraph explaining exactly what changed visually between the two dates (T1 and T2)."
         )
 
         images = [t1_path, t2_path]
@@ -559,6 +604,7 @@ class RemoteSensingVLMClient:
             confidence=0.94,
             params={
                 "backend": self.backend,
+                "model": getattr(self, "model_name", self.model),
                 "mode": "expert_temporal_narrative",
                 "task_classification": classification,
                 "change_fraction": change_fraction,

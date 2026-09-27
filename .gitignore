@@ -254,3 +254,7 @@ artifacts/
 
 # Generated Compose runtime (CPU GPU fallback) from ./run.sh
 .satquery/
+# Protect Environment Secrets
+.env
+backend/.env
+**/.env

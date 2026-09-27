@@ -35,4 +35,6 @@ scikit-learn>=1.4.0
 pytest
 pytest-asyncio
 pytest-mock
+# Cloud VLM Provider
+google-genai>=0.1.1
 

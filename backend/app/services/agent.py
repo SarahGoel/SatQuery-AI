@@ -63,10 +63,16 @@ REGISTRY_MODELS = {
     "cross_modal_analysis_tool",
     "llava",
     "llava-3b",
+    "gemini-2.0-flash",
+    "gemini-2.5-flash",
+    "gemini-3.8-flash",
+    "Qwen/Qwen2-VL-2B-Instruct",
+    "Qwen2-VL-2B-Instruct",
     "sam-vit-b",
     "mobilesam",
     "optical-sar-fusion",
     "change-vqa",
+    "SiameseChangeNet",
     "bigearthnet-encoder",
     "spatial-aligner",
     "spectral-extractor",
@@ -75,6 +81,7 @@ REGISTRY_MODELS = {
     "OpticalSARFusionTool",
     "GeodesicMeasurementTool",
     "RemoteSensingVLMClient",
+    "LocalVisionLanguageClient",
     "GeoChat-RS",
 }
 
@@ -302,6 +309,21 @@ class SatQueryController:
         Enforces strict priority routing and rejection via SemanticIntentRouter / InputInspectorNode.
         """
         force_task = _kwargs.get("force_task")
+        try:
+            from app.services.models.router import AutonomousIntentRouter
+
+            auto_res = AutonomousIntentRouter.classify(
+                query=query,
+                num_images=len(filepaths or []),
+                parsed_meta=parsed_meta,
+                force_task=force_task,
+            )
+            self.scratchpad["autonomous_routing"] = auto_res.to_dict()
+            self.scratchpad["index_guidance"] = auto_res.index_guidance
+            self.scratchpad["target_feature"] = auto_res.target_feature
+        except Exception as auto_err:
+            logger.debug("AutonomousIntentRouter notice: %s", auto_err)
+
         semantic_res = self.router.route(
             query=query,
             filepaths=filepaths,
@@ -1004,21 +1026,36 @@ class SatQueryController:
                             logger.debug("WaterGroundingTool fallback: %s", wg_err)
 
                 if self.last_geojson is None:
+                    from app.services.models.router import AutonomousIntentRouter
+
+                    idx_guide = (
+                        self.scratchpad.get("index_guidance")
+                        or AutonomousIntentRouter.resolve_index_guidance(query)[1]
+                    )
                     grounded = TextGuidedGrounder().ground(
-                        image_path=optical, prompt=query, use_mobilesam=use_mobilesam
+                        image_path=optical,
+                        prompt=query,
+                        use_mobilesam=use_mobilesam,
+                        index_guidance=idx_guide,
                     )
-                    self.last_geojson = (
-                        grounded.geojson
-                        if grounded.geojson
-                        else raster_mask_to_geojson(
-                            optical,
-                            grounded.mask,
-                            task_type="grounding",
-                            label=target_label,
-                            category=target_category,
-                            confidence=grounded.confidence,
-                        )
-                    )
+                    if grounded.geojson:
+                        self.last_geojson = grounded.geojson
+                    elif grounded.mask is not None and getattr(grounded.mask, "any", lambda: False)():
+                        try:
+                            self.last_geojson = raster_mask_to_geojson(
+                                optical,
+                                grounded.mask,
+                                task_type="grounding",
+                                label=target_label,
+                                category=target_category,
+                                confidence=grounded.confidence,
+                            )
+                        except Exception as r_err:
+                            logger.debug("raster_mask_to_geojson notice: %s", r_err)
+                            self.last_geojson = None
+                    else:
+                        self.last_geojson = None
+
                     neural_mask = grounded.mask
                     ground_conf = grounded.confidence
                     extra.append(
@@ -1031,7 +1068,7 @@ class SatQueryController:
                         "mobilesam" if use_mobilesam else "sam-vit-b",
                         {"image_path": str(optical), "prompt": query},
                         0.1,
-                        "Segmented discrete target features via MobileSAM/SAM",
+                        f"Segmented target features using {idx_guide} index guidance",
                     )
                 else:
                     ground_conf = 0.92
@@ -1057,7 +1094,7 @@ class SatQueryController:
 
                 # Generate cyan mask overlay URI
                 overlay_color = (6, 182, 212, 180)  # Cyan overlay
-                if neural_mask is not None:
+                if neural_mask is not None and getattr(neural_mask, "any", lambda: False)():
                     self.last_overlay_uri = ensure_data_uri(create_mask_overlay_data_uri(neural_mask, color=overlay_color))
                 elif self.last_geojson and self.last_geojson.get("features"):
                     try:
@@ -1070,8 +1107,12 @@ class SatQueryController:
                                 m_arr[max(0, py1):min(img_h, py2), max(0, px1):min(img_w, px2)] = 1
                         if m_arr.any():
                             self.last_overlay_uri = ensure_data_uri(create_mask_overlay_data_uri(m_arr, color=overlay_color))
+                        else:
+                            self.last_overlay_uri = None
                     except Exception:
-                        pass
+                        self.last_overlay_uri = None
+                else:
+                    self.last_overlay_uri = None
 
                 # Geodesic area calculation
                 if self.last_geojson:
@@ -1212,18 +1253,20 @@ class SatQueryController:
 
                     vlm_res = RemoteSensingVLMClient().generate(
                         prompt=(
-                            f"Cross-modal EO satellite joint analysis. User question: '{query}'. "
-                            f"Image 1 represents Optical (Cartosat-2S) RGB imagery. "
-                            f"Image 2 represents SAR C-Band radar (Sentinel-1 / RISAT) backscatter. "
+                            f"Cross-modal Earth Observation satellite joint analysis. User question: '{query}'. "
+                            f"Image 1 represents high-resolution Optical (Cartosat-2S) RGB imagery displaying surface color, layout, and reflectance. "
+                            f"Image 2 represents SAR C-Band microwave radar (Sentinel-1 / RISAT) intensity showing structural backscatter and specular reflection. "
                             f"Extracted optical built-up features: {cm_result.params.get('builtup_features_count', 0)}. "
-                            f"Extracted radar water/inundation surfaces: {cm_result.params.get('water_features_count', 0)}. "
-                            f"Synthesize the complementary findings between optical structure and radar backscatter."
+                            f"Extracted radar water/inundation surfaces (sigma-0 < -18 dB): {cm_result.params.get('water_features_count', 0)}. "
+                            f"Explicitly contrast optical surface reflectance against SAR structural backscatter, explaining how radar eliminates cloud or shadow ambiguities to confirm land cover boundaries. "
+                            f"Answer the query in EXACTLY 6 to 7 cohesive sentences in a single non-technical paragraph."
                         ),
                         images=[optical, t2],
                         extra_context={
                             "task": task,
                             "task_type": "cross_modal",
                             "land_cover_classes": ben_classes,
+                            "metadata": primary_meta,
                         },
                     )
                     if vlm_res.text and not vlm_res.text.startswith("[offline stub]"):
@@ -1374,10 +1417,40 @@ class SatQueryController:
         for order, step in enumerate(trace_steps, start=1):
             model_name = step.model if hasattr(step, "model") else (step.get("model") if isinstance(step, dict) else "RS-Grounding-V3")
             params = step.params if hasattr(step, "params") else (step.get("params", {}) if isinstance(step, dict) else {})
+            
+            # Map client wrappers to concrete underlying execution engine name
+            underlying_model = params.get("model")
+            if model_name == "RemoteSensingVLMClient":
+                target_model = underlying_model or ("gemini-3.8-flash" if params.get("backend") == "gemini" else "llava")
+            elif model_name in REGISTRY_MODELS:
+                target_model = model_name
+            elif underlying_model and underlying_model in REGISTRY_MODELS:
+                target_model = underlying_model
+            else:
+                target_model = underlying_model or model_name or "RS-Grounding-V3"
+
+            # Ensure model exists in model_registry table to prevent FK constraint violations
+            try:
+                from app.database.models import ModelRegistry
+                existing_model = self.db.query(ModelRegistry).filter_by(model_name=target_model).first()
+                if not existing_model:
+                    self.db.add(
+                        ModelRegistry(
+                            model_name=target_model,
+                            model_version="1.0.0",
+                            model_type="vlm" if ("gemini" in target_model or "llava" in target_model or "VLM" in target_model) else "specialist",
+                            is_active=True,
+                            local_weights_path="auto",
+                        )
+                    )
+                    self.db.flush()
+            except Exception as reg_err:
+                logger.debug("Dynamic model registration deferred: %s", reg_err)
+
             self.db.add(
                 TraceModelExecution(
                     trace_id=trace.trace_id,
-                    model_name=model_name if model_name in REGISTRY_MODELS else "RS-Grounding-V3",
+                    model_name=target_model,
                     parameter_configuration=params,
                     execution_order=order,
                 )

@@ -160,15 +160,26 @@ export default function AnalysisResultWorkspace({
     }, 700);
   };
 
+  const hasOverlay = Boolean(
+    analysisData?.evidenceImage ||
+    analysisData?.overlay_image ||
+    analysisData?.change_overlay_uri ||
+    analysisData?.overlay_uri ||
+    analysisData?.visual_evidence
+  );
+
+  useEffect(() => {
+    if (!hasOverlay && activeView === "overlay") {
+      setActiveView("original");
+    }
+  }, [hasOverlay]);
+
   const currentImage =
-    activeView === "overlay"
-      ? analysisData?.evidenceImage || analysisData?.baseImage || "/satellite/grounding.jpg"
+    activeView === "overlay" && hasOverlay
+      ? analysisData?.evidenceImage || analysisData?.overlay_image || analysisData?.change_overlay_uri || analysisData?.baseImage || "/satellite/grounding.jpg"
       : analysisData?.baseImage || analysisData?.evidenceImage || "/satellite/water-optical.jpg";
 
-  const downloadImage =
-    activeView === "overlay"
-      ? analysisData?.evidenceImage || analysisData?.baseImage || "/satellite/grounding.jpg"
-      : analysisData?.baseImage || analysisData?.evidenceImage || "/satellite/water-optical.jpg";
+  const downloadImage = currentImage;
 
   // Resolve 4 Metric Cards (Confidence, Workflow, Features, ID Trace) directly above the map
   const rawMetrics = Array.isArray(analysisData?.metrics) && analysisData.metrics.length > 0 ? analysisData.metrics : null;
@@ -182,9 +193,15 @@ export default function AnalysisResultWorkspace({
     label: "Workflow",
     value: (analysisData?.detectedTask || "Single Image Vqa").slice(0, 20),
   };
+  const featureCount =
+    analysisData?.geojson_feature_count != null
+      ? analysisData.geojson_feature_count
+      : analysisData?.geojson?.features?.length != null
+      ? analysisData.geojson.features.length
+      : 0;
   const featuresMetric = rawMetrics?.find((m) => m.label?.toLowerCase().includes("feat")) || rawMetrics?.[2] || {
     label: "Features",
-    value: analysisData?.geojson_feature_count ? `${analysisData.geojson_feature_count} Polygons` : "1 Polygons",
+    value: `${featureCount} Polygons`,
   };
   const traceMetric = rawMetrics?.find((m) => m.label?.toLowerCase().includes("trace")) || rawMetrics?.[3] || {
     label: "ID Trace",
@@ -328,24 +345,19 @@ export default function AnalysisResultWorkspace({
                   />
 
                   {/* Visual Evidence Layer Overlay with dynamic opacity */}
-                  {activeView === "overlay" && (
+                  {activeView === "overlay" && hasOverlay && (
                     <img
                       src={
                         analysisData.evidenceImage ||
                         analysisData.overlay_image ||
                         analysisData.change_overlay_uri ||
-                        analysisData.visual_evidence ||
-                        "/satellite/water-result.jpg"
+                        analysisData.overlay_uri ||
+                        analysisData.visual_evidence
                       }
                       alt="Satellite Visual Evidence Overlay"
                       className="absolute inset-0 w-full h-full object-cover select-none transition-opacity duration-200"
                       style={{
                         opacity: overlayOpacity / 100,
-                      }}
-                      onError={(e) => {
-                        if (e.target && !e.target.src.endsWith("/satellite/water-result.jpg")) {
-                          e.target.src = "/satellite/water-result.jpg";
-                        }
                       }}
                     />
                   )}

@@ -32,6 +32,7 @@ def mock_vlm_for_unit_tests(monkeypatch: pytest.MonkeyPatch, request: pytest.Fix
         "live_model" in request.keywords
         or "test_vlm_client_candidate_endpoints" in request.node.nodeid
         or "test_ollama_payload" in request.node.nodeid
+        or "test_dual_engine_vlm" in request.node.nodeid
     ):
         return
 
