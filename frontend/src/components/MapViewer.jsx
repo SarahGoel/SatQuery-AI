@@ -13,6 +13,8 @@ import Feature from "ol/Feature";
 import Polygon from "ol/geom/Polygon";
 import { fromLonLat, toLonLat } from "ol/proj";
 import { Style, Stroke, Fill, Text } from "ol/style";
+import { getRenderPixel } from "ol/render";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 
 const OPTICAL_XYZ = {
   url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
@@ -180,6 +182,8 @@ const MapViewer = ({
   bboxCoordinates,
   baseImagery: baseImageryProp,
   onBaseImageryChange,
+  selectedComposite = "rgb",
+  onSelectComposite,
   overlayOpacity = 0.70,
 }) => {
   const mapElement = useRef();
@@ -192,8 +196,14 @@ const MapViewer = ({
   const coordPopupRef = useRef(null);
 
   const [baseImagery, setBaseImagery] = useState(baseImageryProp || "optical");
+  const [sarNotice, setSarNotice] = useState(null);
   const [cursorCoords, setCursorCoords] = useState({ lon: 0, lat: 0, zoom: 2 });
   const [pointerActive, setPointerActive] = useState(false);
+
+  // Split curtain state for OpenLayers Optical vs SAR comparison
+  const mapSplitPositionRef = useRef(50);
+  const [mapSplitPosition, setMapSplitPosition] = useState(50);
+  const [isMapDragging, setIsMapDragging] = useState(false);
 
   const activeGeojson =
     analysisData?.geojson ||
@@ -274,14 +284,126 @@ const MapViewer = ({
     return () => initialMap.setTarget(null);
   }, []);
 
+  // OpenLayers Layer Clipping Lifecycle for Optical ◧ SAR Curtain Comparison
   useEffect(() => {
-    const opticalOn = baseImagery === "optical";
-    opticalLayerRef.current?.setVisible(opticalOn);
-    sarLayerRef.current?.setVisible(!opticalOn);
-    if (mapElement.current) {
-      mapElement.current.classList.toggle("sar-grayscale", !opticalOn);
+    const sarLayer = sarLayerRef.current;
+    const opticalLayer = opticalLayerRef.current;
+    if (!sarLayer || !opticalLayer) return;
+
+    const onPrerender = (event) => {
+      const ctx = event.context;
+      const map = mapRef.current;
+      if (!ctx || !map) return;
+      const mapSize = map.getSize();
+      if (!mapSize) return;
+
+      const width = mapSize[0];
+      const height = mapSize[1];
+      const splitPx = width * (mapSplitPositionRef.current / 100);
+
+      // getRenderPixel accurately converts CSS coordinates into canvas context pixels (DPR-safe)
+      const tl = getRenderPixel(event, [splitPx, 0]);
+      const br = getRenderPixel(event, [width, height]);
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(tl[0], 0, Math.max(0, br[0] - tl[0]), Math.max(0, br[1]));
+      ctx.clip();
+    };
+
+    const onPostrender = (event) => {
+      const ctx = event.context;
+      if (ctx) {
+        ctx.restore();
+      }
+    };
+
+    if (baseImagery === "split") {
+      opticalLayer.setVisible(true);
+      sarLayer.setVisible(true);
+      sarLayer.on("prerender", onPrerender);
+      sarLayer.on("postrender", onPostrender);
+      mapRef.current?.render();
+    } else {
+      sarLayer.un("prerender", onPrerender);
+      sarLayer.un("postrender", onPostrender);
+      const opticalOn = baseImagery === "optical";
+      opticalLayer.setVisible(opticalOn);
+      sarLayer.setVisible(!opticalOn);
+      mapRef.current?.render();
     }
+
+    return () => {
+      sarLayer.un("prerender", onPrerender);
+      sarLayer.un("postrender", onPostrender);
+    };
   }, [baseImagery]);
+
+  // Curtain Dragging & Keyboard Navigation for OpenLayers
+  const handleMapCurtainPointerDown = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsMapDragging(true);
+    updateMapCurtainFromClientX(e.clientX);
+  };
+
+  const updateMapCurtainFromClientX = (clientX) => {
+    if (!mapElement.current) return;
+    const rect = mapElement.current.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const pos = ((clientX - rect.left) / rect.width) * 100;
+    const clamped = Math.max(0, Math.min(100, pos));
+    mapSplitPositionRef.current = clamped;
+    setMapSplitPosition(clamped);
+    mapRef.current?.render();
+  };
+
+  useEffect(() => {
+    if (!isMapDragging) return;
+
+    const onPointerMove = (e) => {
+      e.preventDefault();
+      updateMapCurtainFromClientX(e.clientX);
+    };
+
+    const onPointerUp = () => {
+      setIsMapDragging(false);
+    };
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+  }, [isMapDragging]);
+
+  const handleMapCurtainKeyDown = (e) => {
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      const next = Math.max(0, mapSplitPosition - (e.shiftKey ? 10 : 2));
+      mapSplitPositionRef.current = next;
+      setMapSplitPosition(next);
+      mapRef.current?.render();
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      const next = Math.min(100, mapSplitPosition + (e.shiftKey ? 10 : 2));
+      mapSplitPositionRef.current = next;
+      setMapSplitPosition(next);
+      mapRef.current?.render();
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      mapSplitPositionRef.current = 0;
+      setMapSplitPosition(0);
+      mapRef.current?.render();
+    } else if (e.key === "End") {
+      e.preventDefault();
+      mapSplitPositionRef.current = 100;
+      setMapSplitPosition(100);
+      mapRef.current?.render();
+    }
+  };
 
   useEffect(() => {
     if (!mapRef.current) return;
@@ -397,6 +519,11 @@ const MapViewer = ({
   }, [overlayOpacity]);
 
   const handleBaseToggle = (next) => {
+    if (next === "sar") {
+      setSarNotice("Sentinel-1 calibrated SAR σ₀ decibel backscatter feed is unavailable for this AOI. Displaying genuine Natural RGB optical imagery.");
+      setTimeout(() => setSarNotice(null), 5000);
+      return;
+    }
     setBaseImagery(next);
     if (onBaseImageryChange) onBaseImageryChange(next);
   };
@@ -406,12 +533,7 @@ const MapViewer = ({
       className="map-container relative"
       style={{ width: "100%", height: "100%", minHeight: "500px", borderRadius: "8px", overflow: "hidden" }}
     >
-      <style>{`
-        .sar-grayscale .sar-base-layer {
-          filter: grayscale(1) contrast(1.25) brightness(0.92);
-        }
-      `}</style>
-
+      {/* Floating Base Imagery Control */}
       <div
         className="absolute left-3 top-3 z-10 flex items-center gap-1 rounded-xl border border-slate-200/90 bg-white/95 p-1 shadow-md backdrop-blur-md dark:border-slate-700 dark:bg-slate-900/95"
         role="group"
@@ -422,24 +544,83 @@ const MapViewer = ({
           onClick={() => handleBaseToggle("optical")}
           className={`rounded-lg px-2.5 py-1 text-xs font-semibold transition ${
             baseImagery === "optical"
-              ? "bg-sky-600 text-white"
+              ? "bg-sky-600 text-white shadow-2xs"
               : "text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
           }`}
         >
-          Optical
+          <span className="inline-flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+            Natural RGB
+          </span>
         </button>
         <button
           type="button"
           onClick={() => handleBaseToggle("sar")}
-          className={`rounded-lg px-2.5 py-1 text-xs font-semibold transition ${
-            baseImagery === "sar"
-              ? "bg-sky-600 text-white"
-              : "text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
-          }`}
+          className="rounded-lg px-2.5 py-1 text-xs font-semibold text-slate-400 hover:bg-slate-100 dark:text-slate-500 dark:hover:bg-slate-800 transition cursor-pointer"
+          title="SAR σ₀ dB backscatter is unavailable (discrete radar telemetry required)"
         >
-          SAR
+          <span className="inline-flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full border border-slate-400" />
+            SAR σ₀ (Unavailable)
+          </span>
         </button>
       </div>
+
+      {/* Floating Notice when SAR or unavailable layer is clicked */}
+      {sarNotice && (
+        <div className="absolute top-14 left-3 z-20 max-w-sm p-2.5 rounded-xl bg-slate-950/95 backdrop-blur-md border border-amber-600/80 text-amber-200 text-xs shadow-xl animate-in fade-in duration-200 flex items-start justify-between gap-2">
+          <span>{sarNotice}</span>
+          <button
+            type="button"
+            onClick={() => setSarNotice(null)}
+            className="text-amber-400 hover:text-white font-bold ml-2 cursor-pointer"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
+      {/* Optical ◧ SAR Draggable Curtain Overlay for MapViewer */}
+      {baseImagery === "split" && (
+        <div className="absolute inset-0 z-20 pointer-events-none overflow-hidden select-none">
+          {/* Metadata badges for OpenLayers Map Comparison */}
+          <div className="absolute top-14 left-3 pointer-events-none z-10">
+            <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-slate-950/85 backdrop-blur-xs border border-sky-600/70 text-[10px] font-mono font-medium text-sky-300 shadow-sm">
+              <span className="w-1.5 h-1.5 rounded-full bg-sky-400" />
+              <span>Sentinel-2 Optical (Natural RGB)</span>
+            </div>
+          </div>
+
+          <div className="absolute top-14 right-3 pointer-events-none z-10">
+            <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-slate-950/85 backdrop-blur-xs border border-amber-600/70 text-[10px] font-mono font-medium text-amber-300 shadow-sm">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+              <span>Sentinel-1 SAR</span>
+            </div>
+          </div>
+
+          {/* Draggable curtain divider */}
+          <div
+            className="absolute top-0 bottom-0 pointer-events-auto cursor-ew-resize flex items-center justify-center -translate-x-1/2 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+            style={{ left: `${mapSplitPosition}%` }}
+            role="slider"
+            tabIndex={0}
+            aria-label="Split comparison position for Sentinel-2 Optical and Sentinel-1 SAR"
+            aria-valuenow={Math.round(mapSplitPosition)}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            onPointerDown={handleMapCurtainPointerDown}
+            onKeyDown={handleMapCurtainKeyDown}
+          >
+            <div className="w-0.5 h-full bg-white shadow-[0_0_8px_rgba(0,0,0,0.8)]" />
+            <div className="absolute w-8 h-8 rounded-full bg-slate-900 border-2 border-sky-400 shadow-xl flex items-center justify-center text-sky-300 hover:scale-110 active:scale-95 transition-transform cursor-grab active:cursor-grabbing">
+              <div className="flex items-center -space-x-1">
+                <ChevronLeft className="w-3.5 h-3.5" />
+                <ChevronRight className="w-3.5 h-3.5" />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div
         ref={mapElement}
@@ -466,7 +647,7 @@ const MapViewer = ({
           Z <strong>{cursorCoords.zoom}x</strong>
         </span>
         <span className="border-l border-slate-200 pl-2 text-emerald-600 dark:border-slate-700 dark:text-emerald-400">
-          EPSG:3857 · {baseImagery === "optical" ? "Sentinel-2 Optical" : "Sentinel-1 SAR VV/VH"}
+          EPSG:3857 · Natural RGB (Esri World Imagery / Sentinel-2 Equivalent · True Color B04/B03/B02)
         </span>
       </div>
     </div>

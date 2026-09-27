@@ -23,8 +23,12 @@ import {
   Paperclip,
   TrendingUp,
   Search,
+  ChevronLeft,
+  ChevronRight,
+  AlertCircle,
 } from "lucide-react";
 import MapViewer from "../MapViewer";
+import CompositeSwitcher from "./CompositeSwitcher";
 import { useTheme } from "../../context/ThemeContext";
 
 export default function AnalysisResultWorkspace({
@@ -34,10 +38,68 @@ export default function AnalysisResultWorkspace({
   onResetToNewChat,
 }) {
   const { theme } = useTheme();
-  const [activeView, setActiveView] = useState("overlay"); // 'map' | 'overlay' | 'original'
+  const [activeView, setActiveView] = useState("overlay"); // 'map' | 'overlay' | 'original' | 'split'
+  const [selectedComposite, setSelectedComposite] = useState("rgb"); // 'rgb' | 'cir' | 'sar' | 'ndvi' | 'ndwi' | 'mndwi'
   const [overlayOpacity, setOverlayOpacity] = useState(70);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isTraceOpen, setIsTraceOpen] = useState(true);
+
+  // Split Compare curtain state & handlers
+  const [splitPosition, setSplitPosition] = useState(50); // 0 to 100%
+  const [isDraggingCurtain, setIsDraggingCurtain] = useState(false);
+  const curtainContainerRef = useRef(null);
+
+  const handleCurtainPointerDown = (e) => {
+    e.preventDefault();
+    setIsDraggingCurtain(true);
+    updateSplitFromClientX(e.clientX);
+  };
+
+  const updateSplitFromClientX = (clientX) => {
+    if (!curtainContainerRef.current) return;
+    const rect = curtainContainerRef.current.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const pos = ((clientX - rect.left) / rect.width) * 100;
+    const clamped = Math.max(0, Math.min(100, pos));
+    setSplitPosition(clamped);
+  };
+
+  useEffect(() => {
+    if (!isDraggingCurtain) return;
+
+    const onPointerMove = (e) => {
+      e.preventDefault();
+      updateSplitFromClientX(e.clientX);
+    };
+
+    const onPointerUp = () => {
+      setIsDraggingCurtain(false);
+    };
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+  }, [isDraggingCurtain]);
+
+  const handleCurtainKeyDown = (e) => {
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      setSplitPosition((p) => Math.max(0, p - (e.shiftKey ? 10 : 2)));
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      setSplitPosition((p) => Math.min(100, p + (e.shiftKey ? 10 : 2)));
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      setSplitPosition(0);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      setSplitPosition(100);
+    }
+  };
 
   // Follow-up conversation state
   const [followUpQuery, setFollowUpQuery] = useState("");
@@ -311,7 +373,15 @@ export default function AnalysisResultWorkspace({
             ))}
           </div>
 
-          {/* 3. Satellite Map Container Directly Below Metric Cards */}
+          {/* 2b. Multi-Band & False-Color Composite Switcher */}
+          <CompositeSwitcher
+            selectedComposite={selectedComposite}
+            onSelectComposite={setSelectedComposite}
+            analysisData={analysisData}
+            attachedFiles={attachedFiles}
+          />
+
+          {/* 3. Satellite Map Container Directly Below Metric Cards & Composite Switcher */}
           <div className="relative rounded-2xl border border-slate-200/90 dark:border-dark-border bg-slate-900 overflow-hidden shadow-sm">
             {/* Imagery / Map Viewer Container */}
             <div className="relative w-full aspect-[16/10] sm:aspect-[16/10] bg-slate-950 flex items-center justify-center overflow-hidden">
@@ -322,8 +392,115 @@ export default function AnalysisResultWorkspace({
                     geojsonOverlay={analysisData.geojson || analysisData.audit_summary?.geojson}
                     bboxCoordinates={analysisData.bbox || analysisData.bounds}
                     overlayOpacity={overlayOpacity / 100}
+                    selectedComposite={selectedComposite}
+                    onSelectComposite={setSelectedComposite}
                   />
                 </div>
+              ) : activeView === "split" ? (
+                hasTwoAnalysisLayers ? (
+                  <div
+                    ref={curtainContainerRef}
+                    className="relative w-full h-full select-none overflow-hidden"
+                    onPointerDown={handleCurtainPointerDown}
+                  >
+                    {/* Layer 1 (T1 / Baseline) - visible underneath on the left */}
+                    <img
+                      src={layer1Source}
+                      alt={layer1Label || "Baseline satellite imagery"}
+                      className="absolute inset-0 w-full h-full object-cover select-none pointer-events-none"
+                    />
+
+                    {/* Layer 2 (T2 / Post-Event / Evidence) - clipped to the right of the split curtain */}
+                    <div
+                      className="absolute inset-0 w-full h-full overflow-hidden select-none pointer-events-none"
+                      style={{
+                        clipPath: `polygon(${splitPosition}% 0%, 100% 0%, 100% 100%, ${splitPosition}% 100%)`,
+                      }}
+                    >
+                      <img
+                        src={layer2Source}
+                        alt={layer2Label || "Comparison satellite imagery"}
+                        className="absolute inset-0 w-full h-full object-cover select-none pointer-events-none"
+                      />
+                    </div>
+
+                    {/* Vertical Curtain Divider & Draggable Handle */}
+                    <div
+                      className="absolute top-0 bottom-0 z-20 pointer-events-auto cursor-ew-resize flex items-center justify-center -translate-x-1/2 focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
+                      style={{ left: `${splitPosition}%` }}
+                      role="slider"
+                      tabIndex={0}
+                      aria-label="Split comparison position"
+                      aria-valuenow={Math.round(splitPosition)}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      onKeyDown={handleCurtainKeyDown}
+                    >
+                      <div className="w-0.5 h-full bg-white shadow-[0_0_8px_rgba(0,0,0,0.8)]" />
+                      <div className="absolute w-8 h-8 rounded-full bg-slate-900 border-2 border-brand-500 dark:border-cyan-400 shadow-xl flex items-center justify-center text-slate-200 dark:text-cyan-300 hover:scale-110 active:scale-95 transition-transform cursor-grab active:cursor-grabbing">
+                        <div className="flex items-center -space-x-1">
+                          <ChevronLeft className="w-3.5 h-3.5" />
+                          <ChevronRight className="w-3.5 h-3.5" />
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Genuine Metadata Badges (Only displayed when metadata exists) */}
+                    {layer1Label && (
+                      <div className="absolute top-3 left-3 pointer-events-none z-10">
+                        <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-slate-950/85 backdrop-blur-xs border border-emerald-500/70 text-[10px] font-mono font-medium text-emerald-300 shadow-sm">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                          <span>{layer1Label}</span>
+                        </div>
+                      </div>
+                    )}
+
+                    {layer2Label && (
+                      <div className="absolute top-3 right-3 pointer-events-none z-10">
+                        <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-slate-950/85 backdrop-blur-xs border border-cyan-500/70 text-[10px] font-mono font-medium text-cyan-300 shadow-sm">
+                          <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+                          <span>{layer2Label}</span>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* HUD Coordinates */}
+                    <div className="absolute bottom-3 left-3 pointer-events-none z-10">
+                      <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-md bg-slate-950/80 backdrop-blur-xs border border-slate-800 text-[10px] font-mono font-medium text-slate-200 shadow-sm">
+                        <MapPin className="w-3 h-3 text-cyan-400" />
+                        <span>{analysisData.location}</span>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="relative w-full h-full bg-slate-950 flex flex-col items-center justify-center p-6 text-center">
+                    <div className="w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center mb-3 text-amber-400 shadow-sm">
+                      <AlertCircle className="w-6 h-6" />
+                    </div>
+                    <h4 className="text-sm font-bold text-white mb-1.5">
+                      Split comparison requires two available imagery layers.
+                    </h4>
+                    <p className="text-xs text-slate-400 max-w-md leading-relaxed mb-4">
+                      The current analysis contains a single imagery layer. Upload a bi-temporal pair (T1 &amp; T2) or an analysis with distinct baseline and post-event layers to enable split comparison.
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setActiveView("overlay")}
+                        className="px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold shadow-sm transition cursor-pointer"
+                      >
+                        View Overlay
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setActiveView("map")}
+                        className="px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium transition cursor-pointer"
+                      >
+                        Open Map View
+                      </button>
+                    </div>
+                  </div>
+                )
               ) : (
                 <>
                   {/* Base Satellite Image */}
@@ -363,10 +540,14 @@ export default function AnalysisResultWorkspace({
                   )}
 
                   {/* HUD Coordinates / Sensor Overlay */}
-                  <div className="absolute top-3 left-3 pointer-events-none z-10">
+                  <div className="absolute top-3 left-3 pointer-events-none z-10 flex items-center gap-2">
                     <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-md bg-slate-950/80 backdrop-blur-xs border border-slate-800 text-[10px] font-mono font-medium text-slate-200 shadow-sm">
                       <MapPin className="w-3 h-3 text-cyan-400" />
                       <span>{analysisData.location}</span>
+                    </div>
+                    <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-slate-950/80 backdrop-blur-xs border border-slate-800 text-[10px] font-mono font-medium text-cyan-300 shadow-sm">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                      <span>Natural RGB (B04/B03/B02)</span>
                     </div>
                   </div>
 
@@ -389,7 +570,7 @@ export default function AnalysisResultWorkspace({
 
             {/* Viewer Controls Toolbar */}
             <div className="flex flex-wrap items-center justify-between gap-3 p-3 bg-white dark:bg-dark-card border-t border-slate-200/80 dark:border-dark-border">
-              {/* Evidence Layer Toggle & Opacity Slider */}
+              {/* Evidence Layer Toggle & Opacity / Split Slider */}
               <div className="flex items-center gap-3">
                 <div className="inline-flex items-center p-0.5 rounded-lg bg-slate-100 dark:bg-dark-hover border border-slate-200 dark:border-dark-border text-xs">
                   <button
@@ -425,9 +606,20 @@ export default function AnalysisResultWorkspace({
                   >
                     Original
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveView("split")}
+                    className={`px-2.5 py-1 rounded-md font-medium transition cursor-pointer ${
+                      activeView === "split"
+                        ? "bg-brand-600 text-white shadow-2xs font-semibold"
+                        : "text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
+                    }`}
+                  >
+                    Split Compare
+                  </button>
                 </div>
 
-                {activeView !== "original" && (
+                {activeView === "overlay" && (
                   <div className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
                     <span className="text-[11px] font-medium">Opacity:</span>
                     <input
@@ -439,6 +631,22 @@ export default function AnalysisResultWorkspace({
                       className="w-16 sm:w-24 accent-brand-600 h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg cursor-pointer"
                     />
                     <span className="font-mono text-[10px] w-7">{overlayOpacity}%</span>
+                  </div>
+                )}
+
+                {activeView === "split" && hasTwoAnalysisLayers && (
+                  <div className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
+                    <span className="text-[11px] font-medium">Curtain:</span>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      value={splitPosition}
+                      onChange={(e) => setSplitPosition(Number(e.target.value))}
+                      className="w-16 sm:w-24 accent-brand-600 h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg cursor-pointer"
+                      aria-label="Split comparison slider"
+                    />
+                    <span className="font-mono text-[10px] w-7">{Math.round(splitPosition)}%</span>
                   </div>
                 )}
               </div>
