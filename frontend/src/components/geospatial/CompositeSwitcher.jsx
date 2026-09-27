@@ -167,6 +167,7 @@ export default function CompositeSwitcher({
   attachedFiles = [],
   className = "",
 }) {
+  const [isExpanded, setIsExpanded] = useState(true);
   const [activeTooltip, setActiveTooltip] = useState(null);
   const [isDiagnosticsOpen, setIsDiagnosticsOpen] = useState(false);
   const [attemptedMode, setAttemptedMode] = useState(null);
@@ -189,7 +190,11 @@ export default function CompositeSwitcher({
       className={`rounded-xl border border-slate-200/90 dark:border-dark-border bg-white dark:bg-dark-card shadow-2xs p-3 transition-colors ${className}`}
     >
       {/* Top Header: Title & Active Channel Readout */}
-      <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
+      <div
+        className={`flex flex-wrap items-center justify-between gap-2 ${
+          isExpanded ? "mb-2.5" : "mb-0"
+        }`}
+      >
         <div className="flex items-center gap-2">
           <div className="w-6 h-6 rounded-md bg-blue-50 dark:bg-blue-950/60 border border-blue-200/60 dark:border-blue-800/50 flex items-center justify-center shrink-0">
             <Layers className="w-3.5 h-3.5 text-cyan-600 dark:text-cyan-400" />
@@ -203,22 +208,54 @@ export default function CompositeSwitcher({
           </span>
         </div>
 
-        {/* Telemetry / Band Diagnostics Toggle */}
-        <button
-          type="button"
-          onClick={() => setIsDiagnosticsOpen(!isDiagnosticsOpen)}
-          className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-500 dark:text-slate-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition cursor-pointer"
-          title="Inspect sensor band telemetry & availability details"
-        >
-          <Info className="w-3.5 h-3.5 text-slate-400" />
-          <span>Band Diagnostics</span>
-          {isDiagnosticsOpen ? (
-            <ChevronUp className="w-3 h-3" />
-          ) : (
-            <ChevronDown className="w-3 h-3" />
-          )}
-        </button>
+        {/* Header Right Actions: Band Diagnostics & Upward/Downward Collapse Toggle */}
+        <div className="flex items-center gap-2.5">
+          {/* Telemetry / Band Diagnostics Toggle */}
+          <button
+            type="button"
+            onClick={() => {
+              if (!isExpanded) {
+                setIsExpanded(true);
+                setIsDiagnosticsOpen(true);
+              } else {
+                setIsDiagnosticsOpen(!isDiagnosticsOpen);
+              }
+            }}
+            className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-500 dark:text-slate-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition cursor-pointer"
+            title="Inspect sensor band telemetry & availability details"
+          >
+            <Info className="w-3.5 h-3.5 text-slate-400" />
+            <span>Band Diagnostics</span>
+            {isDiagnosticsOpen && isExpanded ? (
+              <ChevronUp className="w-3 h-3" />
+            ) : (
+              <ChevronDown className="w-3 h-3" />
+            )}
+          </button>
+
+          {/* Divider */}
+          <div className="h-3.5 w-px bg-slate-200 dark:bg-dark-border" />
+
+          {/* Upward / Downward arrow toggle to collapse/expand entire composite panel */}
+          <button
+            type="button"
+            onClick={() => setIsExpanded(!isExpanded)}
+            className="p-1 -mr-0.5 rounded-md text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800/60 transition cursor-pointer flex items-center justify-center"
+            title={isExpanded ? "Collapse Spectral Composite" : "Expand Spectral Composite"}
+            aria-label={isExpanded ? "Collapse Spectral Composite" : "Expand Spectral Composite"}
+          >
+            {isExpanded ? (
+              <ChevronUp className="w-4 h-4 text-slate-500 dark:text-slate-400" />
+            ) : (
+              <ChevronDown className="w-4 h-4 text-slate-500 dark:text-slate-400" />
+            )}
+          </button>
+        </div>
       </div>
+
+      {/* Collapsible Content */}
+      {isExpanded && (
+        <div className="animate-in fade-in duration-150">
 
       {/* Button Strip: 6 Composite Modes with Honest Availability */}
       <div
@@ -409,6 +446,8 @@ export default function CompositeSwitcher({
               </p>
             </div>
           </div>
+        </div>
+      )}
         </div>
       )}
     </div>
