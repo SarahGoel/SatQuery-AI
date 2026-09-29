@@ -40,9 +40,67 @@ export default function AnalysisResultWorkspace({
   const { theme } = useTheme();
   const [activeView, setActiveView] = useState("overlay"); // 'map' | 'overlay' | 'original' | 'split'
   const [selectedComposite, setSelectedComposite] = useState("rgb"); // 'rgb' | 'cir' | 'sar' | 'ndvi' | 'ndwi' | 'mndwi'
+  const [compositeImages, setCompositeImages] = useState({});
+  const [isLoadingComposite, setIsLoadingComposite] = useState(false);
+  const [compositeError, setCompositeError] = useState(null);
   const [overlayOpacity, setOverlayOpacity] = useState(70);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isTraceOpen, setIsTraceOpen] = useState(true);
+
+  const handleSelectComposite = async (compositeId) => {
+    setSelectedComposite(compositeId);
+    if (compositeId === "rgb") {
+      return;
+    }
+    if (compositeImages[compositeId]) {
+      return;
+    }
+
+    setIsLoadingComposite(true);
+    setCompositeError(null);
+    try {
+      const traceId =
+        analysisData?.trace_id ||
+        analysisData?.trace?.trace_id ||
+        analysisData?.audit_summary?.trace_id;
+
+      const compType = compositeId === "sar" ? "sar_db" : compositeId;
+      let res = null;
+
+      if (attachedFiles && attachedFiles.length > 0 && attachedFiles[0] instanceof File) {
+        const formData = new FormData();
+        formData.append("file", attachedFiles[0]);
+        formData.append("composite_type", compType);
+        res = await fetch("/api/v1/geospatial/composite", {
+          method: "POST",
+          body: formData,
+        });
+      } else if (traceId) {
+        const formData = new FormData();
+        formData.append("trace_id", traceId);
+        formData.append("composite_type", compType);
+        res = await fetch("/api/v1/geospatial/composite", {
+          method: "POST",
+          body: formData,
+        });
+      }
+
+      if (res && res.ok) {
+        const blob = await res.blob();
+        const objectUrl = URL.createObjectURL(blob);
+        setCompositeImages((prev) => ({ ...prev, [compositeId]: objectUrl }));
+      } else {
+        const errText = res ? await res.text() : "No trace_id or file found";
+        console.warn("Composite fetch failed:", errText);
+        setCompositeError("Could not render selected composite from sensor bands.");
+      }
+    } catch (err) {
+      console.error("Composite fetch error:", err);
+      setCompositeError("Error communicating with composite backend.");
+    } finally {
+      setIsLoadingComposite(false);
+    }
+  };
 
   // Split Compare curtain state & handlers
   const [splitPosition, setSplitPosition] = useState(50); // 0 to 100%
@@ -376,9 +434,10 @@ export default function AnalysisResultWorkspace({
           {/* 2b. Multi-Band & False-Color Composite Switcher */}
           <CompositeSwitcher
             selectedComposite={selectedComposite}
-            onSelectComposite={setSelectedComposite}
+            onSelectComposite={handleSelectComposite}
             analysisData={analysisData}
             attachedFiles={attachedFiles}
+            isLoading={isLoadingComposite}
           />
 
           {/* 3. Satellite Map Container Directly Below Metric Cards & Composite Switcher */}
@@ -393,7 +452,8 @@ export default function AnalysisResultWorkspace({
                     bboxCoordinates={analysisData.bbox || analysisData.bounds}
                     overlayOpacity={overlayOpacity / 100}
                     selectedComposite={selectedComposite}
-                    onSelectComposite={setSelectedComposite}
+                    compositeImageUrl={compositeImages[selectedComposite]}
+                    onSelectComposite={handleSelectComposite}
                   />
                 </div>
               ) : activeView === "split" ? (
@@ -503,14 +563,18 @@ export default function AnalysisResultWorkspace({
                 )
               ) : (
                 <>
-                  {/* Base Satellite Image */}
+                  {/* Base Satellite Image (dynamically renders selected composite when active) */}
                   <img
                     src={
-                      analysisData.baseImage ||
-                      analysisData.original_image ||
-                      analysisData.baseline_image ||
-                      analysisData.t1_preview_url ||
-                      "/satellite/water-optical.jpg"
+                      (selectedComposite !== "rgb" && compositeImages[selectedComposite])
+                        ? compositeImages[selectedComposite]
+                        : (
+                          analysisData.baseImage ||
+                          analysisData.original_image ||
+                          analysisData.baseline_image ||
+                          analysisData.t1_preview_url ||
+                          "/satellite/water-optical.jpg"
+                        )
                     }
                     alt="Satellite Baseline Imagery"
                     className="w-full h-full object-cover select-none"
@@ -520,6 +584,16 @@ export default function AnalysisResultWorkspace({
                       }
                     }}
                   />
+
+                  {/* Loading Overlay while rendering spectral composite */}
+                  {isLoadingComposite && (
+                    <div className="absolute inset-0 bg-slate-950/65 backdrop-blur-xs flex flex-col items-center justify-center z-20 text-white animate-in fade-in duration-150">
+                      <div className="w-8 h-8 rounded-full border-2 border-cyan-400 border-t-transparent animate-spin mb-2" />
+                      <span className="text-xs font-mono text-cyan-300">
+                        Generating {selectedComposite.toUpperCase()} Spectral Composite...
+                      </span>
+                    </div>
+                  )}
 
                   {/* Visual Evidence Layer Overlay with dynamic opacity */}
                   {activeView === "overlay" && hasOverlay && (
@@ -545,9 +619,21 @@ export default function AnalysisResultWorkspace({
                       <MapPin className="w-3 h-3 text-cyan-400" />
                       <span>{analysisData.location}</span>
                     </div>
-                    <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-slate-950/80 backdrop-blur-xs border border-slate-800 text-[10px] font-mono font-medium text-cyan-300 shadow-sm">
+                    <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-slate-950/80 backdrop-blur-xs border border-slate-800 text-[10px] font-mono font-medium text-cyan-300 shadow-sm">
                       <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                      <span>Natural RGB (B04/B03/B02)</span>
+                      <span>
+                        {selectedComposite === "cir"
+                          ? "Color Infrared (B08/B04/B03)"
+                          : selectedComposite === "ndvi"
+                          ? "NDVI Biophysical Index"
+                          : selectedComposite === "ndwi"
+                          ? "NDWI Water Index"
+                          : selectedComposite === "mndwi"
+                          ? "MNDWI Water Index"
+                          : selectedComposite === "sar"
+                          ? "SAR σ₀ Backscatter (dB)"
+                          : "Natural RGB (B04/B03/B02)"}
+                      </span>
                     </div>
                   </div>
 

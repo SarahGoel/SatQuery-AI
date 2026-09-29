@@ -5,7 +5,9 @@ import View from "ol/View";
 import Overlay from "ol/Overlay";
 import TileLayer from "ol/layer/Tile";
 import VectorLayer from "ol/layer/Vector";
+import ImageLayer from "ol/layer/Image";
 import VectorSource from "ol/source/Vector";
+import ImageStatic from "ol/source/ImageStatic";
 import OSM from "ol/source/OSM";
 import XYZ from "ol/source/XYZ";
 import GeoJSON from "ol/format/GeoJSON";
@@ -176,6 +178,66 @@ function bboxToPolygon(bboxCoordinates) {
   return new Polygon([ring]);
 }
 
+function getExtentForComposite(activeBbox, activeGeojson, map) {
+  if (activeBbox) {
+    let minLon;
+    let minLat;
+    let maxLon;
+    let maxLat;
+    if (Array.isArray(activeBbox[0])) {
+      const lons = activeBbox.map((c) => c[0]);
+      const lats = activeBbox.map((c) => c[1]);
+      minLon = Math.min(...lons);
+      maxLon = Math.max(...lons);
+      minLat = Math.min(...lats);
+      maxLat = Math.max(...lats);
+    } else if (activeBbox.length >= 4) {
+      [minLon, minLat, maxLon, maxLat] = activeBbox;
+    }
+    if (minLon != null && minLat != null && maxLon != null && maxLat != null) {
+      const p1 = fromLonLat([minLon, minLat]);
+      const p2 = fromLonLat([maxLon, maxLat]);
+      const extent = [
+        Math.min(p1[0], p2[0]),
+        Math.min(p1[1], p2[1]),
+        Math.max(p1[0], p2[0]),
+        Math.max(p1[1], p2[1]),
+      ];
+      if (isValidExtent(extent)) return extent;
+    }
+  }
+
+  if (activeGeojson) {
+    try {
+      const features = new GeoJSON().readFeatures(activeGeojson, {
+        dataProjection: "EPSG:4326",
+        featureProjection: "EPSG:3857",
+      });
+      if (features.length > 0) {
+        const source = new VectorSource({ features });
+        const extent = source.getExtent();
+        if (isValidExtent(extent)) {
+          if (extent[0] === extent[2] || extent[1] === extent[3]) {
+            return [extent[0] - 500, extent[1] - 500, extent[2] + 500, extent[3] + 500];
+          }
+          return extent;
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (map) {
+    const view = map.getView();
+    const size = map.getSize() || [800, 600];
+    const extent = view.calculateExtent(size);
+    if (isValidExtent(extent)) return extent;
+  }
+
+  return [-20037508.34, -20037508.34, 20037508.34, 20037508.34];
+}
+
 const MapViewer = ({
   analysisData,
   geojsonOverlay,
@@ -184,12 +246,14 @@ const MapViewer = ({
   onBaseImageryChange,
   selectedComposite = "rgb",
   onSelectComposite,
+  compositeImageUrl = null,
   overlayOpacity = 0.70,
 }) => {
   const mapElement = useRef();
   const mapRef = useRef();
   const overlayLayerRef = useRef(null);
   const bboxLayerRef = useRef(null);
+  const compositeLayerRef = useRef(null);
   const opticalLayerRef = useRef(null);
   const sarLayerRef = useRef(null);
   const coordOverlayRef = useRef(null);
@@ -462,6 +526,7 @@ const MapViewer = ({
         source: vectorSource,
         style: (feature) => getFeatureStyle(feature, taskType),
         opacity: overlayOpacity ?? 0.70,
+        zIndex: 20,
         properties: { name: "geojson-dynamic-overlay" },
       });
 
@@ -492,6 +557,7 @@ const MapViewer = ({
           const bboxLayer = new VectorLayer({
             source: bboxSource,
             style: bboxStyle,
+            zIndex: 20,
             properties: { name: "bbox-overlay" },
           });
           bboxLayerRef.current = bboxLayer;
@@ -512,9 +578,51 @@ const MapViewer = ({
     }
   }, [activeGeojson, activeBbox]);
 
+  // Dynamic Spectral Composite Layer Lifecycle (renders CIR, NDVI, NDWI directly on OpenLayers canvas)
+  useEffect(() => {
+    if (!mapRef.current) return;
+
+    if (compositeLayerRef.current) {
+      mapRef.current.removeLayer(compositeLayerRef.current);
+      compositeLayerRef.current = null;
+    }
+
+    if (!compositeImageUrl || selectedComposite === "rgb") {
+      mapRef.current.render();
+      return;
+    }
+
+    const extent = getExtentForComposite(activeBbox, activeGeojson, mapRef.current);
+    const compositeLayer = new ImageLayer({
+      source: new ImageStatic({
+        url: compositeImageUrl,
+        imageExtent: extent,
+        projection: "EPSG:3857",
+      }),
+      opacity: overlayOpacity ?? 0.85,
+      zIndex: 10,
+      properties: { name: `composite-${selectedComposite}` },
+    });
+
+    compositeLayerRef.current = compositeLayer;
+    mapRef.current.addLayer(compositeLayer);
+    mapRef.current.render();
+
+    if (isValidExtent(extent) && extent[0] !== -20037508.34) {
+      try {
+        mapRef.current.getView().fit(extent, { padding: [40, 40, 40, 40], duration: 600 });
+      } catch (err) {
+        console.warn("Could not fit view to composite extent:", err);
+      }
+    }
+  }, [compositeImageUrl, selectedComposite, activeBbox, activeGeojson, overlayOpacity]);
+
   useEffect(() => {
     if (overlayLayerRef.current) {
       overlayLayerRef.current.setOpacity(overlayOpacity ?? 0.70);
+    }
+    if (compositeLayerRef.current) {
+      compositeLayerRef.current.setOpacity(overlayOpacity ?? 0.85);
     }
   }, [overlayOpacity]);
 
@@ -647,7 +755,7 @@ const MapViewer = ({
           Z <strong>{cursorCoords.zoom}x</strong>
         </span>
         <span className="border-l border-slate-200 pl-2 text-emerald-600 dark:border-slate-700 dark:text-emerald-400">
-          EPSG:3857 · Natural RGB (Esri World Imagery / Sentinel-2 Equivalent · True Color B04/B03/B02)
+          EPSG:3857 · {selectedComposite === "rgb" ? "Natural RGB (Esri World Imagery / Sentinel-2 Equivalent · True Color B04/B03/B02)" : `Active Spectral Composite: ${selectedComposite.toUpperCase()} Layer`}
         </span>
       </div>
     </div>

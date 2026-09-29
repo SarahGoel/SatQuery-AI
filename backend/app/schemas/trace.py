@@ -13,6 +13,7 @@ class InputMetadataSchema(BaseModel):
     sensor: Optional[str] = Field(default=None, description="Identified sensor platform (e.g. Cartosat-2S, Sentinel-1)")
     resolution: Optional[str] = Field(default=None, description="Spatial resolution")
     band_count: Optional[int] = Field(default=None, description="Number of spectral/radar bands")
+    available_composites: List[str] = Field(default_factory=list, description="Available spectral composite visualization modes")
 
 
 class RegistryExecutionSchema(BaseModel):

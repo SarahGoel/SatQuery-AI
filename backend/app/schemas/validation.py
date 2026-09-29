@@ -167,6 +167,7 @@ class QueryResponseEnvelope(BaseModel):
     evidence_type: Optional[str] = None
     detected_task: Optional[str] = None
     leaflet_bounds: Optional[list[list[float]]] = None
+    available_composites: Optional[list[str]] = Field(default_factory=list)
     audit_summary: dict
     trace: dict
     report: dict = Field(default_factory=dict)

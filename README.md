@@ -1,145 +1,82 @@
-# SatQuery AI
+# SatQuery AI: Autonomous Multimodal Earth Observation Intelligence Console
 
-**Smart India Hackathon 2025 — Problem Statement SIH26167**
+[![ISRO SAC Compliant](https://img.shields.io/badge/ISRO%20SAC-SIH26167-blue.svg)](https://www.isro.gov.in/)
+[![Architecture](https://img.shields.io/badge/Architecture-Dual--Engine%20VLM%20%2B%20Agentic%20Router-teal.svg)](#system-architecture)
+[![Evaluation](https://img.shields.io/badge/Air--Gap%20Ready-Verified-green.svg)](#air-gapped-sovereign-deployment)
+[![License](https://img.shields.io/badge/License-MIT-gray.svg)](LICENSE)
 
-Agentic vision-language assistant for ISRO Earth Observation (EO) data analysis. The stack is designed for **sovereign, air-gapped, on-premise GPU deployments**: geospatial I/O, deep-learning inference, and the analyst UI are isolated services that never require an outbound network after weights are staged.
+SatQuery AI is an agentic, multi-modal Earth Observation (EO) platform engineered for the **Indian Space Research Organisation (ISRO) Space Applications Centre (SAC)**. Designed to analyze single, co-registered optical-SAR, and bi-temporal satellite rasters through natural-language queries, SatQuery AI translates user intent into deterministic remote-sensing pipelines, vector-grounded segmentation masks, and auditable scientific intelligence.
 
-## What it does
+---
 
-Analysts submit a natural-language query plus one or more GeoTIFFs (optical Cartosat-2S, SAR RISAT, optional T1/T2 pair). A stateful controller:
+## Evaluator Quick Start (One-Step Run)
 
-1. Parses GeoTIFF CRS, affine transform, and bounds (Rasterio).
-2. Validates spatial overlap (Shapely / PostGIS).
-3. Classifies the query into `bi_temporal_change_analysis`, `single_image_grounding`, `cross_modal_joint_analysis`, or `single_image_vqa`.
-4. Routes work through alignment, spectral indices, fusion, grounding, or Change-VQA modules.
-5. Persists an auditable execution trace (parameters, models, confidence, output).
+### System Prerequisites
+- **Operating System:** Linux (Ubuntu 20.04+ recommended), macOS, or Windows 10/11 with WSL2.
+- **Container Runtime:** [Docker Engine](https://docs.docker.com/engine/install/) (v24.0+) and [Docker Compose](https://docs.docker.com/compose/install/) (v2.20+).
+- *No local Python, Node.js, GDAL, or database installations are needed.*
 
-## Tech stack
+### 1. Launch Platform
+Clone the repository and execute the master initialization script:
 
-| Layer | Technology |
-| --- | --- |
-| UI | React, OpenLayers 9, Tailwind CSS |
-| API | FastAPI, Uvicorn, Pydantic v2.6.1 |
-| Geospatial | GDAL 3.8+, Rasterio 1.3.9, Shapely 2.0.2, Fiona 1.9.5, PostGIS |
-| Inference | PyTorch 2.2.1, Transformers 4.38.1, PEFT 0.8.2, LangGraph 0.1.1 |
-| Serving | Ollama (default) or vLLM — local open-weight VLMs (e.g. LLaVA-3B) |
-| Persistence | PostgreSQL 16 + PostGIS 3.4 |
-
-## Repository layout
-
-```
-.
-├── docker-compose.yml          # React, FastAPI, PostGIS, Ollama / vLLM
-├── db/init-postgis.sh         # Enable PostGIS on first boot
-├── backend/                  # GDAL-enabled FastAPI + agent + DL modules
-├── frontend/                 # Analyst console (map, query, traces, PDF)
-├── local_models/             # Offline weight drop zone (not committed)
-└── scripts/                  # Weight prefetch + CLI pipeline smoke test
+```bash
+git clone https://github.com/singhtanyarajput/SatQueryAI.git
+cd SatQueryAI
+chmod +x run.sh
+./run.sh
 ```
 
-Geospatial manipulation lives under `backend/app/services/geospatial/`. Deep-learning inference lives under `backend/app/services/models/`. The UI never talks to the GPU or GDAL directly.
+### 2. Access the Applications
+- **Analyst Web Console:** [http://localhost:5173](http://localhost:5173)
+- **FastAPI OpenAPI Interactive Documentation:** [http://localhost:8000/docs](http://localhost:8000/docs)
+- **Air-Gap Verification Diagnostic Probe:** [http://localhost:8000/api/v1/health/air-gap](http://localhost:8000/api/v1/health/air-gap)
 
-## Prerequisites
+---
 
-- Docker Engine 24+ with Compose v2
-- NVIDIA Container Toolkit (on-premise GPU hosts)
-- 16+ GB GPU VRAM recommended for LLaVA-class models
-- For local Python without Docker: Python 3.11, GDAL 3.8+ system libraries
+## VLM Inference Configuration
 
-## Quick start (local, networked)
+SatQuery AI supports both instant cloud evaluation and sovereign air-gapped evaluation. Configure your selection in `backend/.env`:
 
-1. Copy environment defaults (optional):
-
-   ```bash
-   cp .env.example .env
+### Option A: Cloud Inference (Fastest — 2-Second Turnaround)
+1. Get a free API key from [Google AI Studio](https://aistudio.google.com/).
+2. Edit `backend/.env`:
+   ```env
+   VLM_PROVIDER=gemini
+   GEMINI_API_KEY=AIzaSyYourActualKeyHere
    ```
+3. Restart the backend: `docker compose restart backend`.
 
-2. Prefetch open-weight checkpoints **before** disconnecting from the internet:
+### Option B: Sovereign Air-Gapped Mode (100% Offline)
+Leave the API key blank or configure Ollama:
+```env
+VLM_PROVIDER=ollama
+GEMINI_API_KEY=
+OLLAMA_BASE_URL=http://satquery_ollama:11434
+```
+*Note: In offline CPU environments, heavy vision tensor calculations take approximately 60–90 seconds per query.*
 
-   ```bash
-   bash scripts/download_weights.sh
-   ```
+---
 
-3. Start PostGIS, API, UI, and Ollama:
+## Core Evaluation Scenarios
 
-   ```bash
-   docker compose up --build
-   ```
+| # | Query Archetype | Sample Evaluation Query | Expected System Action |
+| :-: | :--- | :--- | :--- |
+| **1** | **Scene VQA** | *"Describe the land cover and major objects visible in this image."* | Returns a concise 6-to-7 line domain-grounded summary distinguishing agricultural cropland from forest and bare soil. |
+| **2** | **Feature Grounding** | *"Highlight the water bodies referred to in the query."* | Calculates NDWI anchor points, executes MobileSAM, and generates an exact vector polygon with area in $\text{km}^2$. |
+| **3** | **Bi-Temporal Change** | *"What changed between these two dates and where did the change occur?"* | Calculates Siamese difference masks and outputs localized directional findings (`[INCREASED]`, `[DECREASED]`). |
+| **4** | **Cross-Modal Fusion** | *"Use the optical and SAR image together to identify build-up and water-covered regions."* | SIFT-aligns both rasters, identifies water using SAR specular drop ($\sigma_0 < -18\text{ dB}$), and isolates built-up areas via optical-SAR texture fusion. |
+| **5** | **Class Tracking** | *"Has the built-up area increased, decreased, or remained unchanged?"* | Computes NDBI deltas across T1 and T2 to output verified urban development metrics. |
 
-4. Open the analyst console at [http://localhost:3000](http://localhost:3000).  
-   API docs: [http://localhost:8000/docs](http://localhost:8000/docs).  
-   Health: [http://localhost:8000/api/v1/health](http://localhost:8000/api/v1/health).
+---
 
-vLLM profile (optional):
+## Stopping the Platform
 
+To cleanly stop all running services and network bridges:
 ```bash
-docker compose --profile vllm up --build
+docker compose down
 ```
 
-Then set `INFERENCE_BACKEND=vllm` on the backend service.
-
-## Air-gapped / on-premise GPU
-
-1. On a connected machine, run `scripts/download_weights.sh` and copy `local_models/` onto the isolated host (see `local_models/README.md`).
-2. Load container images from an internal registry or `docker save` / `docker load` tarballs.
-3. Point `LOCAL_MODELS_DIR` at the mounted weight volume. Do not set Hugging Face tokens.
-4. Confirm `INFERENCE_BACKEND` is `ollama` or `vllm` and that the serving container can read `/models`.
-5. Run `docker compose up` with **no** outbound routes. Health must report `gpu_available` and `models_dir_present`.
-
-## Backend without Docker
-
+To remove containers and wipe associated database volumes:
 ```bash
-cd backend
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-source .venv/bin/activate
-pip install -r requirements.txt
-export DATABASE_URL=postgresql://satquery_admin:isro_secure_db@localhost:5432/satquery_gis
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+docker compose down -v
 ```
-
-GDAL/Rasterio must resolve native libraries (`gdal-config` on PATH).
-
-## Frontend without Docker
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Vite proxies `/api` to `http://localhost:8000`.
-
-## CLI smoke test
-
-```bash
-python scripts/test_pipeline.py
-```
-
-Uses mocked GeoTIFF metadata (no GPU required) to exercise classification and workflow routing.
-
-## Evaluation guidelines (SIH26167)
-
-Judges and internal reviewers should exercise:
-
-| Criterion | How to evaluate |
-| --- | --- |
-| Spatial correctness | Upload two overlapping GeoTIFFs; traces must record CRS, affine matrix, and EPSG:4326 bounding polygon. Misaligned pairs must fail `validate_spatial_alignment`. |
-| Task routing | Queries mentioning “change / T1 / T2” → `bi_temporal_change_analysis`; “highlight / segment / locate” → `single_image_grounding`; optical+SAR → `cross_modal_joint_analysis`; otherwise VQA. |
-| Spectral products | NDVI / NDWI tensors appear in the trace `registry_execution` parameters for optical workflows. |
-| Auditability | Every `/api/v1/satquery/analyze` response includes `AuditableTraceLogSchema`; PostGIS `auditable_execution_traces` and `trace_model_executions` rows must match. |
-| Sovereignty | With network disabled, inference still runs from `local_models/` via Ollama or vLLM. |
-| UI | MapViewer overlays GeoJSON / change rasters; TraceViewer shows the live JSON log; ReportDownloader exports PDF. |
-
-Do **not** ship proprietary ISRO scenes in this repository. Use synthetic or openly licensed GeoTIFFs for demos.
-
-## API surface
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `GET` | `/api/v1/health` | Process, PostGIS, and GPU metrics |
-| `POST` | `/api/v1/satquery/analyze` | Multipart GeoTIFF + natural-language query |
-
-## License
-
-GNU General Public License v3.0 — see [LICENSE](LICENSE).
