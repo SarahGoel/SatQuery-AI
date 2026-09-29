@@ -20,7 +20,7 @@ SatQuery AI is an agentic, multi-modal Earth Observation (EO) platform engineere
 Clone the repository and execute the master initialization script:
 
 ```bash
-git clone https://github.com/singhtanyarajput/SatQueryAI.git
+git clone https://github.com/SarahGoel/SatQuery-AI
 cd SatQueryAI
 chmod +x run.sh
 ./run.sh
