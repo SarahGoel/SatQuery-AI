@@ -189,20 +189,30 @@ class SatQueryController:
                 affine = [float(v) for v in list(src.transform)[:6]]
                 crs = src.crs.to_string() if src.crs else "EPSG:4326"
 
-                if src.count >= 4:
-                    detected = ["Red", "Green", "Blue", "NIR"]
-                elif src.count in [1, 2]:
+                tag_dict = src.tags() or {}
+                tag_str = " ".join(f"{k}={v}" for k, v in tag_dict.items()).lower()
+                is_sar = (src.count in [1, 2]) or any(k in tag_str for k in ["sar", "sentinel-1", "sigma0", "backscatter", "radar"])
+
+                if is_sar:
                     detected = ["SAR-C-Band"]
+                    available_composites = ["sar_db"]
+                elif src.count >= 5:
+                    detected = ["Red", "Green", "Blue", "NIR", "SWIR"]
+                    available_composites = ["rgb", "cir", "ndvi", "ndwi", "mndwi", "ndbi"]
+                elif src.count >= 4:
+                    detected = ["Red", "Green", "Blue", "NIR"]
+                    available_composites = ["rgb", "cir", "ndvi", "ndwi"]
                 else:
                     detected = ["RGB"]
+                    available_composites = ["rgb"]
 
-                sensor_tag = src.tags().get("SENSOR") or src.tags().get("PLATFORM")
+                sensor_tag = tag_dict.get("SENSOR") or tag_dict.get("PLATFORM")
                 if sensor_tag:
                     sensor = sensor_tag
+                elif is_sar:
+                    sensor = "SAR / Radar (C-Band)"
                 elif src.count >= 4:
                     sensor = "Optical (Multispectral)"
-                elif src.count in [1, 2]:
-                    sensor = "SAR / Radar (C-Band)"
                 else:
                     sensor = "Optical Imagery (True Color)"
 
@@ -220,6 +230,7 @@ class SatQueryController:
                     "sensor": sensor,
                     "resolution": resolution,
                     "band_count": src.count,
+                    "available_composites": available_composites,
                 }
         except Exception as rio_err:
             logger.warning("rasterio_parse_failed (%s); using PIL image metadata fallback for %s", rio_err, path)
@@ -228,7 +239,18 @@ class SatQueryController:
             with Image.open(path) as img:
                 w, h = img.size
                 cnt = len(img.getbands())
-                detected = ["Red", "Green", "Blue", "NIR"] if cnt >= 4 else (["SAR-C-Band"] if cnt in [1, 2] else ["RGB"])
+                if cnt in [1, 2]:
+                    detected = ["SAR-C-Band"]
+                    available_composites = ["sar_db"]
+                elif cnt >= 5:
+                    detected = ["Red", "Green", "Blue", "NIR", "SWIR"]
+                    available_composites = ["rgb", "cir", "ndvi", "ndwi", "mndwi", "ndbi"]
+                elif cnt >= 4:
+                    detected = ["Red", "Green", "Blue", "NIR"]
+                    available_composites = ["rgb", "cir", "ndvi", "ndwi"]
+                else:
+                    detected = ["RGB"]
+                    available_composites = ["rgb"]
                 bounds = _compute_proportional_bounds(w, h)
                 return {
                     "filepath": path,
@@ -241,6 +263,7 @@ class SatQueryController:
                     "sensor": "Optical Imagery (True Color)",
                     "resolution": "1.0m",
                     "band_count": cnt,
+                    "available_composites": available_composites,
                 }
 
     def validate_spatial_alignment(
@@ -449,6 +472,7 @@ class SatQueryController:
                     sensor="N/A (Earth Observation Conversational QA)",
                     resolution="N/A",
                     band_count=0,
+                    available_composites=["rgb"],
                 ),
                 registry_execution=execution_pipeline,
                 tools_executed=execution_pipeline,
@@ -624,6 +648,7 @@ class SatQueryController:
                 sensor=primary_meta.get("sensor", "Optical Imagery (True Color)"),
                 resolution=primary_meta.get("resolution", "1.0m"),
                 band_count=primary_meta.get("band_count", 3),
+                available_composites=primary_meta.get("available_composites", ["rgb"]),
             ),
             registry_execution=execution_pipeline,
             tools_executed=execution_pipeline,
@@ -1671,6 +1696,7 @@ def compile_satquery_graph(controller: SatQueryController):
                 sensor="N/A (Earth Observation Conversational QA)",
                 resolution="N/A",
                 band_count=0,
+                available_composites=["rgb"],
             )
         else:
             primary_meta = parsed_meta[0] if parsed_meta else {}
@@ -1709,6 +1735,7 @@ def compile_satquery_graph(controller: SatQueryController):
                 sensor=primary_meta.get("sensor", "Optical Imagery (True Color)"),
                 resolution=primary_meta.get("resolution", "1.0m"),
                 band_count=primary_meta.get("band_count", 3),
+                available_composites=primary_meta.get("available_composites", ["rgb"]),
             )
 
         steps = list(state.get("execution_pipeline") or [])

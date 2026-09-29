@@ -137,6 +137,20 @@ def _include_existing_routers() -> None:
     app.include_router(query_router, prefix="/api/v1", tags=["query"])
     app.include_router(query_router, tags=["query"])
 
+    try:
+        from api.routes_geospatial import router as geospatial_router
+    except (ImportError, ModuleNotFoundError):
+        from backend.api.routes_geospatial import router as geospatial_router
+    app.include_router(geospatial_router, prefix="/api/v1")
+    app.include_router(geospatial_router)
+
+    try:
+        from api.routes_export import router as export_router
+    except (ImportError, ModuleNotFoundError):
+        from backend.api.routes_export import router as export_router
+    app.include_router(export_router, prefix="/api/v1")
+    app.include_router(export_router)
+
 
 _include_existing_routers()
 
@@ -219,6 +233,9 @@ async def root() -> dict[str, str]:
         "upload": "/upload",
         "analyze": "/api/v1/satquery/analyze",
         "query": "/api/v1/query",
+        "composite": "/api/v1/geospatial/composite",
+        "inspect_point": "/api/v1/geospatial/inspect-point",
+        "export": "/api/v1/reports/{trace_id}/export",
         "reports": "/api/v1/reports/{trace_id}",
         "docs": "/docs",
     }

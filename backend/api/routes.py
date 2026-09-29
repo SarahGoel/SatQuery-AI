@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import traceback
 import uuid
 from pathlib import Path
@@ -381,6 +382,122 @@ def _geometry_payload(
     return geojson, bbox, change_mask
 
 
+def parse_spatial_aoi(aoi_input: Any) -> Optional[tuple[dict[str, Any], tuple[float, float, float, float]]]:
+    """Parse bounding box array, GeoJSON Polygon, or dict into (geometry, (min_lon, min_lat, max_lon, max_lat))."""
+    if not aoi_input:
+        return None
+
+    parsed = aoi_input
+    if isinstance(aoi_input, str):
+        s = aoi_input.strip()
+        if not s:
+            return None
+        try:
+            parsed = json.loads(s)
+        except Exception:
+            parts = [p.strip() for p in s.split(",") if p.strip()]
+            if len(parts) == 4:
+                try:
+                    parsed = [float(x) for x in parts]
+                except ValueError:
+                    return None
+            else:
+                return None
+
+    if isinstance(parsed, (list, tuple)) and len(parsed) == 4:
+        try:
+            min_lon, min_lat, max_lon, max_lat = [float(x) for x in parsed]
+            west = min(min_lon, max_lon)
+            east = max(min_lon, max_lon)
+            south = min(min_lat, max_lat)
+            north = max(min_lat, max_lat)
+            geom = {
+                "type": "Polygon",
+                "coordinates": [[[west, south], [east, south], [east, north], [west, north], [west, south]]],
+            }
+            return geom, (west, south, east, north)
+        except (ValueError, TypeError):
+            return None
+
+    if isinstance(parsed, dict):
+        if all(k in parsed for k in ["min_lon", "min_lat", "max_lon", "max_lat"]):
+            west, south, east, north = float(parsed["min_lon"]), float(parsed["min_lat"]), float(parsed["max_lon"]), float(parsed["max_lat"])
+            geom = {
+                "type": "Polygon",
+                "coordinates": [[[west, south], [east, south], [east, north], [west, north], [west, south]]],
+            }
+            return geom, (west, south, east, north)
+        if all(k in parsed for k in ["west", "south", "east", "north"]):
+            west, south, east, north = float(parsed["west"]), float(parsed["south"]), float(parsed["east"]), float(parsed["north"])
+            geom = {
+                "type": "Polygon",
+                "coordinates": [[[west, south], [east, south], [east, north], [west, north], [west, south]]],
+            }
+            return geom, (west, south, east, north)
+
+        if parsed.get("type") == "Feature" and "geometry" in parsed:
+            parsed = parsed["geometry"]
+        elif parsed.get("type") == "FeatureCollection" and parsed.get("features"):
+            parsed = parsed["features"][0].get("geometry", {})
+
+        if parsed.get("type") == "Polygon" and "coordinates" in parsed:
+            coords = parsed["coordinates"]
+            lons = [float(pt[0]) for ring in coords for pt in ring]
+            lats = [float(pt[1]) for ring in coords for pt in ring]
+            if lons and lats:
+                return parsed, (min(lons), min(lats), max(lons), max(lats))
+
+    return None
+
+
+def clip_raster_to_aoi(raster_path: str, aoi_geometry: dict[str, Any], output_path: str) -> str:
+    """Clips a GeoTIFF to the exact AOI polygon using rasterio.mask.mask."""
+    if rasterio is None:
+        return raster_path
+
+    try:
+        import rasterio.mask as rio_mask
+        from rasterio.warp import transform_geom
+
+        with rasterio.open(raster_path) as src:
+            geom = aoi_geometry
+            if src.crs and str(src.crs).upper() not in ["EPSG:4326", "WGS 84", "+PROJ=LONGPLAT"]:
+                try:
+                    geom = transform_geom("EPSG:4326", src.crs, geom)
+                except Exception as reproj_err:
+                    logger.warning("Reprojecting AOI geometry failed (%s); attempting mask with original", reproj_err)
+
+            try:
+                out_image, out_transform = rio_mask.mask(src, [geom], crop=True)
+            except Exception as mask_err:
+                logger.warning("rasterio.mask failed (%s); retaining uncropped raster %s", mask_err, raster_path)
+                return raster_path
+
+            out_meta = src.meta.copy()
+            out_meta.update({
+                "driver": "GTiff",
+                "height": out_image.shape[1],
+                "width": out_image.shape[2],
+                "transform": out_transform,
+            })
+
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        with rasterio.open(output_path, "w", **out_meta) as dst:
+            dst.write(out_image)
+
+        logger.info(
+            "Successfully cropped raster %s to AOI -> %s (%dx%d)",
+            raster_path,
+            output_path,
+            out_meta["width"],
+            out_meta["height"],
+        )
+        return output_path
+    except Exception as exc:
+        logger.warning("clip_raster_to_aoi exception (%s); retaining %s", exc, raster_path)
+        return raster_path
+
+
 def _coordinates_from_geojson(geojson: dict[str, Any] | None) -> list[Any]:
     if not geojson:
         return []
@@ -415,6 +532,7 @@ async def query_pipeline(
     image_t1: UploadFile | None = File(default=None),
     image_t2: UploadFile | None = File(default=None),
     session_id: str = Form(default=None),
+    spatial_aoi: Optional[str] = Form(default=None),
     force_task: str | None = Form(default=None),
     use_mobilesam: bool = Form(default=True),
     benchmark_dataset: str | None = Form(default=None),
@@ -472,6 +590,20 @@ async def query_pipeline(
                 try:
                     form_data_bm = await request.form()
                     active_benchmark = form_data_bm.get("benchmark_dataset")
+                except Exception:
+                    pass
+
+        # Resolve spatial_aoi from Form parameter, Request headers, or Request form fallback
+        active_aoi = spatial_aoi if isinstance(spatial_aoi, str) and spatial_aoi.strip() else None
+        if not active_aoi and request is not None:
+            try:
+                form_data_aoi = await request.form()
+                active_aoi = form_data_aoi.get("spatial_aoi")
+            except Exception:
+                pass
+            if not active_aoi:
+                try:
+                    active_aoi = request.query_params.get("spatial_aoi")
                 except Exception:
                     pass
 
@@ -580,6 +712,27 @@ async def query_pipeline(
                 filepaths.append(str(saved))
             logger.info("Persisted %d raster image(s) for execution: %s", len(filepaths), filepaths)
 
+            if active_aoi:
+                parsed_aoi = parse_spatial_aoi(active_aoi)
+                if parsed_aoi:
+                    aoi_geom, (min_lon, min_lat, max_lon, max_lat) = parsed_aoi
+                    cropped_filepaths: list[str] = []
+                    for idx, fp in enumerate(filepaths):
+                        suffix = Path(fp).suffix.lower()
+                        if suffix in GEOTIFF_SUFFIXES:
+                            cropped_target = trace_dir / f"aoi_cropped_{idx}{suffix}"
+                            out_p = clip_raster_to_aoi(fp, aoi_geom, str(cropped_target))
+                            cropped_filepaths.append(out_p)
+                        else:
+                            cropped_filepaths.append(fp)
+                    filepaths = cropped_filepaths
+                    aoi_desc = f"Bounding Box [{min_lon:.5f}, {min_lat:.5f}, {max_lon:.5f}, {max_lat:.5f}]"
+                    logger.info("Applied Spatial AOI cropping (%s) across %d raster(s)", aoi_desc, len(filepaths))
+                    query_text = (
+                        f"[Spatial AOI: User-defined region {aoi_desc}. Imagery cropped to this boundary.]\n"
+                        f"{query_text}"
+                    )
+
         logger.info(
             "query_received",
             extra={
@@ -621,6 +774,7 @@ async def query_pipeline(
             trace.trace_id,
             sanitize_for_json({
                 **trace_dict,
+                "filepaths": filepaths,
                 "geojson": geojson,
                 "change_overlay_uri": controller.last_overlay_uri,
                 "audit_summary": audit_summary,
@@ -785,6 +939,7 @@ async def query_pipeline(
                     analysis_data=sanitize_for_json({
                         "id": trace.trace_id,
                         "traceId": trace.trace_id,
+                        "filepaths": filepaths,
                         "detectedTask": detected_task,
                         "selectedWorkflow": " + ".join(models_executed),
                         "confidence": int(conf * 100) if conf <= 1.0 else int(conf),
@@ -842,11 +997,14 @@ async def query_pipeline(
             "visual_evidence": visual_evidence,
             "evidence_type": visual_evidence_type,
             "leaflet_bounds": leaflet_bounds,
+            "available_composites": input_meta.get("available_composites") or ["rgb"],
             "audit_summary": audit_summary,
             "trace": trace_dict,
             "report": {
                 "json": f"/api/v1/reports/{trace.trace_id}?format=json",
                 "pdf": f"/api/v1/reports/{trace.trace_id}?format=pdf",
+                "geojson": f"/api/v1/reports/{trace.trace_id}/export?format=geojson",
+                "kml": f"/api/v1/reports/{trace.trace_id}/export?format=kml",
             },
         }
         sanitized_response = sanitize_for_json(response_payload)
@@ -995,4 +1153,27 @@ async def download_audit_report(
         media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# Mount geospatial and vector export subrouters directly for universal routing
+try:
+    from api.routes_geospatial import router as geospatial_subrouter
+    router.include_router(geospatial_subrouter)
+except (ImportError, ModuleNotFoundError):
+    try:
+        from backend.api.routes_geospatial import router as geospatial_subrouter
+        router.include_router(geospatial_subrouter)
+    except Exception:
+        pass
+
+try:
+    from api.routes_export import router as export_subrouter
+    router.include_router(export_subrouter)
+except (ImportError, ModuleNotFoundError):
+    try:
+        from backend.api.routes_export import router as export_subrouter
+        router.include_router(export_subrouter)
+    except Exception:
+        pass
+
 

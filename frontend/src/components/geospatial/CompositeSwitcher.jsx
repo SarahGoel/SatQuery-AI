@@ -102,60 +102,146 @@ export const COMPOSITE_MODES = [
  * genuine remote-sensing data for any of the composite modes.
  */
 export function evaluateCompositeModes(analysisData, attachedFiles) {
+  // 1. Check explicit available_composites list from telemetry
+  const rawAvail =
+    analysisData?.available_composites ||
+    analysisData?.input_metadata?.available_composites ||
+    analysisData?.metadata?.available_composites ||
+    analysisData?.audit_summary?.input_metadata?.available_composites ||
+    [];
+
+  const availableComposites = Array.isArray(rawAvail)
+    ? rawAvail.map((s) => String(s).toLowerCase().trim())
+    : [];
+
+  // 2. Modality & band inspections
+  const modalities = (
+    analysisData?.input_metadata?.modalities ||
+    analysisData?.modalities ||
+    []
+  ).map((m) => String(m).toLowerCase());
+
+  const bandCount = Number(
+    analysisData?.input_metadata?.band_count ||
+    analysisData?.band_count ||
+    (modalities.length > 0 ? modalities.length : 3)
+  );
+
   const bands = analysisData?.bands || {};
-  const hasNir = Boolean(bands.nir || analysisData?.nir_band || analysisData?.nir_url);
-  const hasRed = Boolean(bands.red || analysisData?.red_band);
-  const hasGreen = Boolean(bands.green || analysisData?.green_band);
-  const hasSwir = Boolean(bands.swir || analysisData?.swir_band || analysisData?.swir_url);
-  const hasSar = Boolean(bands.sar_sigma0 || analysisData?.sar_db_url || analysisData?.sar_matrix);
-  const hasNdvi = Boolean(analysisData?.ndvi_url || analysisData?.ndvi_raster || (hasNir && hasRed));
-  const hasNdwi = Boolean(analysisData?.ndwi_url || analysisData?.ndwi_raster || (hasNir && hasGreen));
-  const hasMndwi = Boolean(analysisData?.mndwi_url || analysisData?.mndwi_raster || (hasSwir && hasGreen));
+  const hasNir = Boolean(
+    bands.nir != null ||
+    analysisData?.nir_band ||
+    analysisData?.nir_url ||
+    modalities.some((m) => m.includes("nir") || m.includes("near-infrared") || m.includes("near-ir")) ||
+    bandCount >= 4
+  );
+  const hasRed = Boolean(
+    bands.red != null ||
+    analysisData?.red_band ||
+    modalities.some((m) => m.includes("red")) ||
+    bandCount >= 3
+  );
+  const hasGreen = Boolean(
+    bands.green != null ||
+    analysisData?.green_band ||
+    modalities.some((m) => m.includes("green")) ||
+    bandCount >= 2
+  );
+  const hasSwir = Boolean(
+    bands.swir != null ||
+    analysisData?.swir_band ||
+    analysisData?.swir_url ||
+    modalities.some((m) => m.includes("swir")) ||
+    bandCount >= 5
+  );
+  const hasSar = Boolean(
+    bands.sar_sigma0 != null ||
+    analysisData?.sar_db_url ||
+    analysisData?.sar_matrix ||
+    modalities.some((m) => m.includes("sar") || m.includes("radar"))
+  );
 
   return COMPOSITE_MODES.map((mode) => {
-    if (mode.id === "rgb") {
-      return { ...mode, isSupported: true };
+    const id = mode.id.toLowerCase();
+
+    // SAR mode requires calibrated microwave radar data
+    if (id === "sar") {
+      const isAvail = hasSar || availableComposites.includes("sar") || availableComposites.includes("sar_db");
+      return {
+        ...mode,
+        isSupported: isAvail,
+        isEstimated: false,
+        sourceText: isAvail ? "Sentinel-1 C-SAR (Calibrated σ₀ dB)" : mode.sourceText,
+        missingReason: isAvail ? null : mode.missingReason,
+      };
     }
-    if (mode.id === "cir" && hasNir && hasRed && hasGreen) {
+
+    // RGB is always supported natively
+    if (id === "rgb") {
       return {
         ...mode,
         isSupported: true,
-        sourceText: "Sentinel-2 NIR + Red + Green",
+        isEstimated: false,
         missingReason: null,
       };
     }
-    if (mode.id === "sar" && hasSar) {
+
+    // SWIR / MNDWI mode requires SWIR channel
+    if (id === "mndwi") {
+      const isAvail = (hasSwir && hasGreen) || availableComposites.includes("mndwi");
+      return {
+        ...mode,
+        isSupported: isAvail,
+        isEstimated: false,
+        sourceText: isAvail ? "Real MNDWI Spectral Raster Layer" : mode.sourceText,
+        missingReason: isAvail ? null : mode.missingReason,
+      };
+    }
+
+    // Optical composites (CIR, NDVI, NDWI)
+    // If native NIR is present: real biophysical layer
+    // If 3-band RGB: supported via visible-spectrum approximations
+    const isNative = hasNir || availableComposites.includes(id);
+
+    if (id === "cir") {
       return {
         ...mode,
         isSupported: true,
-        sourceText: "Sentinel-1 C-SAR (Calibrated σ₀ dB)",
+        isEstimated: !isNative,
+        badgeLabel: isNative ? "CIR (False Color)" : "CIR (Pseudo-NIR Est.)",
+        sourceText: isNative
+          ? "Sentinel-2 / 4-Band NIR + Red + Green"
+          : "Pseudo-NIR False Color (Visible Spectrum Estimation)",
         missingReason: null,
       };
     }
-    if (mode.id === "ndvi" && hasNdvi) {
+
+    if (id === "ndvi") {
       return {
         ...mode,
         isSupported: true,
-        sourceText: "Real NDVI Raster Layer",
+        isEstimated: !isNative,
+        badgeLabel: isNative ? "NDVI Index" : "NDVI (Visible GLI/GRVI)",
+        sourceText: isNative
+          ? "Real NDVI Spectral Raster Layer"
+          : "Visible Vegetation Index (GRVI Approximation)",
         missingReason: null,
       };
     }
-    if (mode.id === "ndwi" && hasNdwi) {
+
+    if (id === "ndwi") {
       return {
         ...mode,
         isSupported: true,
-        sourceText: "Real NDWI Raster Layer",
+        isEstimated: !isNative,
+        badgeLabel: isNative ? "NDWI Index" : "NDWI (Visible Water Contrast)",
+        sourceText: isNative
+          ? "Real NDWI Spectral Raster Layer"
+          : "Visible Water Contrast (Blue-Red Approximation)",
         missingReason: null,
       };
     }
-    if (mode.id === "mndwi" && hasMndwi) {
-      return {
-        ...mode,
-        isSupported: true,
-        sourceText: "Real MNDWI Raster Layer",
-        missingReason: null,
-      };
-    }
+
     return mode;
   });
 }
@@ -165,6 +251,7 @@ export default function CompositeSwitcher({
   onSelectComposite = () => {},
   analysisData = null,
   attachedFiles = [],
+  isLoading = false,
   className = "",
 }) {
   const [isExpanded, setIsExpanded] = useState(true);
@@ -203,8 +290,8 @@ export default function CompositeSwitcher({
             Spectral Composite
           </span>
           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-mono font-medium bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200/80 dark:border-emerald-800/50">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-            {activeModeObj.badgeLabel}
+            <span className={`w-1.5 h-1.5 rounded-full ${isLoading ? "bg-cyan-400 animate-spin" : "bg-emerald-500 animate-pulse"}`} />
+            {isLoading ? `Rendering ${activeModeObj.shortLabel}...` : activeModeObj.badgeLabel}
           </span>
         </div>
 
@@ -296,10 +383,14 @@ export default function CompositeSwitcher({
                   >
                     {mode.shortLabel}
                   </span>
-                  {mode.isSupported ? (
+                  {isSelected && isLoading ? (
+                    <span className="w-2.5 h-2.5 rounded-full border-2 border-white/30 border-t-white animate-spin shrink-0" />
+                  ) : mode.isSupported ? (
                     <span
-                      className="w-2 h-2 rounded-full bg-emerald-400 shrink-0"
-                      title="Real imagery source available"
+                      className={`w-2 h-2 rounded-full shrink-0 ${
+                        mode.isEstimated ? "bg-amber-400" : "bg-emerald-400"
+                      }`}
+                      title={mode.isEstimated ? "Visible spectrum approximation" : "Real imagery source available"}
                     />
                   ) : (
                     <span
@@ -312,9 +403,15 @@ export default function CompositeSwitcher({
                 {/* Subtitle: Availability / Sensor requirement */}
                 <div className="w-full text-[10px] leading-tight truncate">
                   {mode.isSupported ? (
-                    <span className={isSelected ? "text-cyan-100" : "text-emerald-600 dark:text-emerald-400 font-medium"}>
-                      ● Available
-                    </span>
+                    mode.isEstimated ? (
+                      <span className={isSelected ? "text-amber-200 font-semibold" : "text-amber-600 dark:text-amber-400 font-medium"}>
+                        ● Est. Visible
+                      </span>
+                    ) : (
+                      <span className={isSelected ? "text-cyan-100 font-semibold" : "text-emerald-600 dark:text-emerald-400 font-medium"}>
+                        ● Available
+                      </span>
+                    )
                   ) : (
                     <span className={isSelected ? "text-slate-200" : "text-slate-400 dark:text-slate-500"}>
                       ○ Unavailable
@@ -331,17 +428,30 @@ export default function CompositeSwitcher({
                     <span
                       className={`text-[9px] font-mono px-1.5 py-0.5 rounded font-semibold ${
                         mode.isSupported
-                          ? "bg-emerald-950 text-emerald-300 border border-emerald-700/60"
-                          : "bg-amber-950 text-amber-300 border border-amber-700/60"
+                          ? mode.isEstimated
+                            ? "bg-amber-950 text-amber-300 border border-amber-700/60"
+                            : "bg-emerald-950 text-emerald-300 border border-emerald-700/60"
+                          : "bg-rose-950 text-rose-300 border border-rose-700/60"
                       }`}
                     >
-                      {mode.isSupported ? "● Available" : "○ Unavailable"}
+                      {mode.isSupported
+                        ? mode.isEstimated
+                          ? "● Est. Visible"
+                          : "● Available"
+                        : "○ Unavailable"}
                     </span>
                   </div>
 
                   <p className="text-[10px] text-slate-300 leading-relaxed mb-2">
                     {mode.description}
                   </p>
+
+                  {mode.isEstimated && (
+                    <div className="text-[10px] text-amber-300/90 flex items-start gap-1.5 bg-amber-950/40 p-1.5 rounded-md border border-amber-800/40 mb-1.5">
+                      <Info className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+                      <span>Approximation calculated from visible bands (no discrete NIR required).</span>
+                    </div>
+                  )}
 
                   <div className="bg-slate-900/90 rounded-md p-1.5 border border-slate-800 text-[9px] font-mono text-cyan-300 mb-1.5">
                     <span className="text-slate-400 block text-[8px] uppercase tracking-wider font-sans mb-0.5">
